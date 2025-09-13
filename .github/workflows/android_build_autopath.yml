@@ -1,0 +1,65 @@
+name: build-android
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter 3.22.0
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.22.0"
+          channel: stable
+          cache: true
+
+      - name: Locate Flutter project root (auto)
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          PD="$(dirname "$(git ls-files | grep -m1 -E '(^|/)(pubspec\.yaml)$')")"
+          if [ -z "$PD" ]; then
+            echo "Could not find pubspec.yaml in repo."
+            echo "Tree preview:"; ls -la
+            exit 2
+          fi
+          if [ "$PD" = "." ]; then PD="$PWD"; fi
+          test -f "$PD/pubspec.yaml"
+          echo "Project dir: $PD"
+          echo "PROJECT_DIR=$PD" >> $GITHUB_ENV
+
+      - name: Pin deps and resolve
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          rm -rf "$HOME/.pub-cache"
+          dart pub add workmanager:^0.7.0
+          flutter pub get
+          echo "== Resolved direct deps (direct block) =="
+          flutter pub deps --style=compact | sed -n '/direct dependencies:/,/dev dependencies:/p'
+
+      - name: Diagnose v1 markers (project + pub cache)
+        shell: bash
+        run: |
+          echo "== project android/ =="
+          (cd "${{ env.PROJECT_DIR }}" &&            grep -R -nE 'io\.flutter\.app|FlutterApplication|GeneratedPluginRegistrant|PluginRegistry\.Registrar|registerWith\s*\(|ShimPluginRegistry' android) || true
+
+          echo "== pub cache =="
+          PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+          grep -R --include=*.java --include=*.kt -nE             'PluginRegistry\.Registrar|registerWith\s*\(|io\.flutter\.app|FlutterApplication|GeneratedPluginRegistrant|ShimPluginRegistry'             "$PUB_CACHE" 2>/dev/null || true
+
+      - name: Build release APK
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --release -v
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
