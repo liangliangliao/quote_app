@@ -80,35 +80,63 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== BEFORE ==="; sed -n '1,200p' pubspec.yaml || true
-          rm -f _rewrite.py
-          printf '%s\n' \
-          'import re, pathlib' \
-          'p = pathlib.Path("pubspec.yaml")' \
-          'text = p.read_text(encoding="utf-8")' \
-          'lines = text.splitlines()' \
-          'if "environment:" not in text:' \
-          '  lines.append("environment:")' \
-          '  lines.append("  sdk: \'>=3.5.0 <4.0.0\'")' \
-          'else:' \
-          '  new=[]; i=0' \
-          '  while i < len(lines):' \
-          '    if lines[i].strip().startswith("environment:"):' \
-          '      new.append(lines[i]); i+=1; seen=False' \
-          '      while i < len(lines) and (lines[i].startswith(" ") or lines[i].strip()==""):' \
-          '        if lines[i].strip().startswith("sdk:"): lines[i]="  sdk: \'>=3.5.0 <4.0.0\'"; seen=True' \
-          '        new.append(lines[i]); i+=1' \
-          '      if not seen: new.append("  sdk: \'>=3.5.0 <4.0.0\'")' \
-          '      new.extend(lines[i:]); lines=new; break' \
-          '    i+=1' \
-          'out=[]; ctx=None' \
-          'for ln in lines:' \
-          '  if re.match(r"^\\s*dependencies:\\s*$", ln): ctx="dep"; out.append(ln); continue' \
-          '  if re.match(r"^\\s*dev_dependencies:\\s*$", ln): ctx="dev"; out.append(ln); continue' \
-          '  if re.match(r"^\\s*\\w", ln): ctx=None' \
-          '  if ctx in ("dep","dev") and re.search(r":\\s*[\\^~]?\\d", ln): ln = re.sub(r":\\s*[^#]+", ": any", ln)' \
-          '  out.append(ln)' \
-          'p.write_text("\\n".join(out), encoding="utf-8")' \
-          > _rewrite.py
+          cat > _rewrite.py <<'PY'
+import re, pathlib
+
+p = pathlib.Path("pubspec.yaml")
+text = p.read_text(encoding="utf-8")
+lines = text.splitlines()
+
+# normalize environment sdk to >=3.5.0 <4.0.0
+if "environment:" not in text:
+    lines.append("environment:")
+    lines.append("  sdk: '>=3.5.0 <4.0.0'")
+else:
+    out = []
+    i = 0
+    patched = False
+    while i < len(lines):
+        out.append(lines[i])
+        if lines[i].strip().startswith("environment:"):
+            i += 1
+            seen = False
+            while i < len(lines) and (lines[i].startswith(" ") or lines[i].strip() == ""):
+                if lines[i].strip().startswith("sdk:"):
+                    out.append("  sdk: '>=3.5.0 <4.0.0'")
+                    seen = True
+                    patched = True
+                    # skip the old sdk line
+                    i += 1
+                    while i < len(lines) and lines[i].strip().startswith("#"):
+                        out.append(lines[i]); i += 1
+                    break
+                out.append(lines[i]); i += 1
+            if not seen:
+                out.append("  sdk: '>=3.5.0 <4.0.0'")
+            out.extend(lines[i:])
+            lines = out
+            break
+        i += 1
+if not patched and "environment:" in text and "sdk:" not in "\n".join(lines):
+    lines.append("  sdk: '>=3.5.0 <4.0.0'")
+
+# set versions in dependencies/dev_dependencies to 'any'
+out = []
+ctx = None
+for ln in lines:
+    if re.match(r'^\s*dependencies:\s*$', ln):
+        ctx = "dep"; out.append(ln); continue
+    if re.match(r'^\s*dev_dependencies:\s*$', ln):
+        ctx = "dev"; out.append(ln); continue
+    if re.match(r'^\s*\w', ln):
+        ctx = None
+    if ctx in ("dep","dev"):
+        if re.search(r':\s*([~^]?\d|\d)', ln):
+            ln = re.sub(r':\s*[^#]+', ': any', ln)
+    out.append(ln)
+
+p.write_text("\n".join(out), encoding="utf-8")
+PY
           python3 _rewrite.py
           echo "=== AFTER ==="; sed -n '1,200p' pubspec.yaml || true
 
@@ -212,9 +240,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Flutter build log ==="
-          [ -f build_apk.log ] && grep -nE "(^e: |\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" build_apk.log || true
+          [ -f build_apk.log ] && grep -nE "(^e: |\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:)" build_apk.log || true
           echo "=== Gradle build log ==="
-          [ -f gradle_build.log ] && grep -nE "(: error:|\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
+          [ -f gradle_build.log ] && grep -nE "(: error:|\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
 
       - name: Upload artifacts
         if: always()
