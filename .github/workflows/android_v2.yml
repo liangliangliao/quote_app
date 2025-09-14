@@ -64,10 +64,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 本地项目清理
           flutter clean || true
-          rm -rf "$HOME/.pub-cache" || true
-          flutter pub cache clean || true
           rm -f pubspec.lock || true
+          # 全局 pub 缓存强制无交互清理（双保险：命令和目录都清）
+          yes | flutter pub cache clean >/dev/null 2>&1 || true
+          rm -rf "$HOME/.pub-cache" || true
 
       - name: Flutter pub get (fresh)
         working-directory: ${{ steps.detect.outputs.project_dir }}
