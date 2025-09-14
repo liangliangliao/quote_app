@@ -1,175 +1,153 @@
-name: Build Android APK
+name: Build Android APK (auto-unzip & clean env)
 
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "quote_app3333.zip"
-      - "quote_app_src_modified_manifest_no_label.zip"
+    branches: [ main, master ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # 让 Gradle/JVM 不至于 OOM
+      # 给 Flutter/Gradle 更多内存
       GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g"
-      # —— 每次构建隔离缓存（指向临时目录）——
+      # 强制用临时 pub 缓存，避免污染
       PUB_CACHE: ${{ runner.temp }}/pub-cache
-      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-user-home
-      # 禁用 Gradle Daemon 和 Build Cache（双保险）
-      ORG_GRADLE_PROJECT_org.gradle.daemon: "false"
-      ORG_GRADLE_PROJECT_org.gradle.caching: "false"
 
     steps:
-      - name: Checkout (clean workspace)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          clean: true
 
-      - name: Sanity check - list repo root
+      - name: Sanity - list repo root
         run: ls -lah
 
-      - name: Pick project zip (auto-detect)
-        id: pick
+      # 自动定位 Flutter 工程；若没找到就解压最新 ZIP 再找
+      - name: Locate Flutter project root (auto; unzip latest zip if needed)
+        id: locate
         shell: bash
         run: |
-          set -e
-          if [[ -f "quote_app_src_modified_manifest_no_label.zip" ]]; then
-            zip="quote_app_src_modified_manifest_no_label.zip"
-          elif [[ -f "quote_app3333.zip" ]]; then    # 修正：同时支持 3333
-            zip="quote_app3333.zip"
-          elif [[ -f "quote_app333.zip" ]]; then     # 兼容原有命名
-            zip="quote_app333.zip"
-          else
-            # fallback to any top-level .zip
-            count=$(ls -1 *.zip 2>/dev/null | wc -l || true)
-            if [[ "$count" -ge 1 ]]; then
-              zip="$(ls -1t *.zip | head -n 1)"
-            else
-              echo "❌ 未找到 zip：请把工程 zip 放在仓库根目录，例如 quote_app.zip"; exit 1
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+
+          echo "== First pass: search for pubspec.yaml =="
+          FOUND="$(find "$ROOT" -maxdepth 6 -type f -name pubspec.yaml | head -n1 || true)"
+
+          if [ -z "$FOUND" ]; then
+            echo "No pubspec.yaml found. Try to unzip latest .zip in repo root..."
+            ZIP="$(ls -1t "$ROOT"/*.zip 2>/dev/null | head -n1 || true)"
+            if [ -n "$ZIP" ]; then
+              echo "Unzipping: $ZIP"
+              unzip -q "$ZIP" -d "$ROOT"
+              FOUND="$(find "$ROOT" -maxdepth 6 -type f -name pubspec.yaml | head -n1 || true)"
             fi
           fi
-          echo "zip=$zip" >> "$GITHUB_OUTPUT"
-          echo "Using ZIP: $zip"
-          echo "—— ZIP 内容预览 ——"
-          unzip -l "$zip" | head -n 50
 
-      - name: Unzip project to workspace root
+          if [ -z "$FOUND" ]; then
+            echo "❌ pubspec.yaml not found in repo (even after unzip)."
+            exit 66
+          fi
+
+          DIR="$(dirname "$FOUND")"
+          echo "✅ Detected Flutter project at: $DIR"
+          echo "project_dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Show detected project tree (top-level)
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
-          unzip -q "${{ steps.pick.outputs.zip }}" -d .
-          echo "After unzip:"
+          pwd
           ls -lah
+          echo "---- android/ ----"
+          [ -d android ] && find android -maxdepth 2 -type f -printf "%p\n" | sort | sed -n '1,200p' || true
 
-      - name: Detect project type and root
-        id: detect
-        shell: bash
-        run: |
-          set -e
-          # find Flutter project root (pubspec.yaml) within depth 3
-          FLUTTER_DIR="$(find . -maxdepth 3 -type f -name pubspec.yaml | head -n 1 | xargs -I{} dirname {} || true)"
-          GRADLE_DIR=""
-          if [[ -z "$FLUTTER_DIR" ]]; then
-            # find Android Gradle settings
-            GRADLE_DIR="$(find . -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1 | xargs -I{} dirname {} || true)"
-          fi
-          if [[ -n "$FLUTTER_DIR" ]]; then
-            echo "project_type=flutter" >> $GITHUB_OUTPUT
-            echo "project_dir=$FLUTTER_DIR" >> $GITHUB_OUTPUT
-            echo "Detected Flutter project: $FLUTTER_DIR"
-          elif [[ -n "$GRADLE_DIR" ]]; then
-            echo "project_type=gradle" >> $GITHUB_OUTPUT
-            echo "project_dir=$GRADLE_DIR" >> $GITHUB_OUTPUT
-            echo "Detected Android Gradle project: $GRADLE_DIR"
-          else
-            echo "❌ 未检测到 Flutter 或 Android Gradle 工程（缺少 pubspec.yaml / settings.gradle）"; exit 1
-          fi
-
-      # —— 关键：强制“干净主机” —— #
-      - name: Enforce pristine host (delete caches)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # 删除 runner 的常见缓存（哪怕是新机，这么做也无害）
-          rm -rf "$HOME/.pub-cache" "$HOME/.gradle" "$HOME/.android" || true
-          # 使用隔离目录作为本次构建缓存根，并保证为空
-          rm -rf "$PUB_CACHE" "$GRADLE_USER_HOME" || true
-          mkdir -p "$PUB_CACHE" "$GRADLE_USER_HOME"
-          # 项目级清理
-          if [ -d "${{ steps.detect.outputs.project_dir }}/android" ]; then
-            rm -rf "${{ steps.detect.outputs.project_dir }}/android/.gradle" || true
-          fi
-          (cd "${{ steps.detect.outputs.project_dir }}" && flutter clean || true)
-
-      # ---------- Flutter path (preferred) ----------
-      - name: Set up JDK 17 (for both Flutter & Gradle)
-        if: steps.detect.outputs.project_type == 'flutter' || steps.detect.outputs.project_type == 'gradle'
+      - name: Set up JDK 17 (for Flutter & Gradle)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter
-        if: steps.detect.outputs.project_type == 'flutter'
+      - name: Set up Flutter 3.22.0 (stable; no cache)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.35.3'
+          flutter-version: '3.22.0'
           channel: stable
-          cache: false   # 关闭 SDK 缓存，确保每次全新
+          cache: false
 
-      - name: Flutter pub get
-        if: steps.detect.outputs.project_type == 'flutter'
-        run: flutter pub get
-        working-directory: ${{ steps.detect.outputs.project_dir }}
-
-      - name: Ensure Android platform exists
-        if: steps.detect.outputs.project_type == 'flutter'
+      # 彻底清理缓存，保证“干净机器”效果
+      - name: Clean caches (pub & gradle)
+        shell: bash
         run: |
-          if [ ! -d "android" ]; then
-            flutter create . --platforms=android --project-name quote_app --org com.example
-          fi
-        working-directory: ${{ steps.detect.outputs.project_dir }}
+          set -euo pipefail
+          echo "PUB_CACHE=$PUB_CACHE"
+          rm -rf "$PUB_CACHE" || true
+          rm -rf "$HOME/.pub-cache" || true
+          rm -rf "$HOME/.gradle" || true
 
-      - name: Build APK (Flutter release; no daemon / no build cache)
-        if: steps.detect.outputs.project_type == 'flutter'
-        env:
-          # 显式关闭 Gradle 守护进程/缓存（命令行层面再加一遍）
-          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.caching=false -Dorg.gradle.jvmargs="-Xmx4g"
+      - name: Flutter doctor (sanity)
+        run: flutter doctor -v
+
+      - name: Flutter pub get (clean env)
+        id: pubget
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
         run: |
-          # 让 Gradle wrapper 初始化（若存在）
-          [ -x android/gradlew ] && (cd android && ./gradlew -v >/dev/null 2>&1 || true)
-          flutter build apk --release -v --no-pub
-        working-directory: ${{ steps.detect.outputs.project_dir }}
+          set -euo pipefail
+          flutter clean || true
+          flutter pub get
 
-      - name: Upload APK (Flutter)
-        if: steps.detect.outputs.project_type == 'flutter'
-        uses: actions/upload-artifact@v4
-        with:
-          name: quote_app-apk
-          path: ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
-
-      # ---------- Gradle path (fallback) ----------
-      - name: Set up Gradle 8.4
-        if: steps.detect.outputs.project_type == 'gradle'
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 8.4
-          cache-disabled: true   # 关闭 Gradle 缓存
-
-      - name: Assemble debug with Gradle wrapper (no daemon / no build cache)
-        if: steps.detect.outputs.project_type == 'gradle'
-        working-directory: ${{ steps.detect.outputs.project_dir }}
+      # 构建 APK，并捕获完整日志到 artifacts
+      - name: Build APK (release · capture logs)
+        id: build_apk
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
         run: |
-          if [[ -x "./gradlew" ]]; then
-            ./gradlew assembleDebug --no-daemon --no-build-cache --stacktrace --info
+          set +e
+          # 捕获 flutter 构建日志
+          flutter build apk --release -v 2>&1 | tee build_apk.log
+          FB=$?
+          echo "flutter_exit=$FB" >> "$GITHUB_OUTPUT"
+
+          # 若存在 Gradle wrapper，顺带做一份 Gradle 构建日志（便于排查）
+          if [ -f android/gradlew ]; then
+            echo "== Also try Gradle assembleRelease (for additional logs) =="
+            ( cd android && ./gradlew --no-daemon assembleRelease -i -S ) 2>&1 | tee gradle_build.log
+            GB=${PIPESTATUS[0]}
           else
-            gradle assembleDebug --no-daemon --stacktrace --info
+            echo "No Gradle wrapper found; skip direct gradle build." | tee gradle_build.log
+            GB=0
           fi
+          echo "gradle_exit=$GB" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK (Gradle)
-        if: steps.detect.outputs.project_type == 'gradle'
+          # 不在此步失败，先把日志上传
+          exit 0
+
+      - name: Upload build logs (always)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
+          name: build-logs
           path: |
-            ${{ steps.detect.outputs.project_dir }}/**/outputs/apk/**/*.apk
+            ${{ steps.locate.outputs.project_dir }}/build_apk.log
+            ${{ steps.locate.outputs.project_dir }}/gradle_build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload APK (if exists)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: ${{ steps.locate.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: warn
+          retention-days: 7
+
+      # 根据真实的退出码，在最后一步统一失败
+      - name: Fail if build failed
+        shell: bash
+        run: |
+          FB="${{ steps.build_apk.outputs.flutter_exit }}"
+          GB="${{ steps.build_apk.outputs.gradle_exit }}"
+          echo "Final exit codes -> flutter: ${FB:-unset}, gradle: ${GB:-unset}"
+          # 以 Flutter 的结果为准；若 flutter 成功，gradle 的结果仅作参考
+          if [ -z "${FB:-}" ] || [ "$FB" -ne 0 ]; then
+            exit 1
+          fi
