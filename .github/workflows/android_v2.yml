@@ -1,142 +1,94 @@
-name: Android v2 Build
+name: Scan Android V1 Markers
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main, master ]
 
 jobs:
-  build:
+  scan:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create temp dir (avoid runner.temp)
-        id: mktemp
-        shell: bash
-        run: |
-          set -euo pipefail
-          TMPDIR="$(mktemp -d)"
-          echo "dir=$TMPDIR" >> "$GITHUB_OUTPUT"
-          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
-
-      - name: Sanity check - list repo root
-        shell: bash
-        run: ls -lah
-
-      # 选最新 zip（优先根目录被 git 跟踪的；否则回退到任何位置最新文件）
-      - name: Pick latest ZIP (prefer root tracked; robust fallbacks)
-        id: pickzip
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-
-          pick_by_git_commit() {
-            printf "%s\n" "$1" | while IFS= read -r f; do
-              [ -n "$f" ] || continue
-              ct="$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)"
-              printf "%s %s\n" "$ct" "$f"
-            done | sort -nr | head -n1 | cut -d' ' -f2-
-          }
-
-          ROOT_TRACKED="$(git ls-files --full-name | awk '/^[^\/]+\.zip$/ {print}' || true)"
-          SEL=""
-          if [ -n "${ROOT_TRACKED:-}" ]; then
-            SEL="$(pick_by_git_commit "$ROOT_TRACKED")"
-          fi
-          if [ -z "$SEL" ]; then
-            ANY_TRACKED="$(git ls-files --full-name | awk '/\.zip$/ {print}' || true)"
-            if [ -n "${ANY_TRACKED:-}" ]; then
-              SEL="$(pick_by_git_commit "$ANY_TRACKED")"
-            fi
-          fi
-          if [ -z "$SEL" ]; then
-            SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
-          fi
-          if [ -z "$SEL" ]; then
-            SEL="$(find . -maxdepth 6 -type f -name '*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
-            SEL="${SEL#./}"
-          fi
-          [ -n "$SEL" ] || { echo "No .zip files found."; exit 1; }
-          echo "Picked ZIP: $SEL"
-          echo "zip=$GITHUB_WORKSPACE/$SEL" >> "$GITHUB_OUTPUT"
-
-      - name: Unzip project
-        id: unzip
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC_DIR="${TMPDIR}/src"
-          mkdir -p "$SRC_DIR"
-          unzip -q "${{ steps.pickzip.outputs.zip }}" -d "$SRC_DIR"
-          echo "src=$SRC_DIR" >> "$GITHUB_OUTPUT"
-          echo "After unzip:"; ls -lah "$SRC_DIR"
-
-      - name: Detect Flutter project root
+      - name: Detect Flutter project dir (find pubspec.yaml)
         id: detect
         shell: bash
         run: |
           set -euo pipefail
-          ROOT="$(find "${{ steps.unzip.outputs.src }}" -maxdepth 6 -type f -name pubspec.yaml -print -quit || true)"
-          if [ -z "$ROOT" ]; then
-            echo "::error::No pubspec.yaml found inside the ZIP"
-            exit 66
+          DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
+          if [ -z "$DIR" ]; then
+            echo "❌ pubspec.yaml 未找到"; exit 66
           fi
-          DIR="$(dirname "$ROOT")"
           echo "project_dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
-          echo "Detected Flutter project at: $DIR"
+          echo "Project dir: $DIR"
 
-      - name: Set up JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter 3.22.0 (stable)
+      - name: Setup Flutter 3.35.3 (stable)
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.3'
           channel: stable
-          cache: true
+          cache: false
 
-      - name: Flutter pub get
-        working-directory: ${{ steps.detect.outputs.project_dir }}
+      - name: Clean ALL pub caches (fresh resolve)
         shell: bash
-        run: flutter pub get
+        run: |
+          set -euo pipefail
+          flutter --version
+          rm -rf "$HOME/.pub-cache" || true
+          flutter pub cache clean || true
 
-      - name: Build APK (capture logs)
-        id: build_apk
+      - name: Flutter pub get (fresh)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
-          set -o pipefail
-          flutter build apk --release -v 2>&1 | tee build_apk.log
-          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          flutter clean || true
+          rm -f pubspec.lock || true
+          flutter pub get
 
-      - name: Upload APK (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: |
-            ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: ignore
-
-      - name: Upload build logs (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            ${{ steps.detect.outputs.project_dir }}/build_apk.log
-
-      - name: Fail if build failed
-        if: steps.build_apk.outputs.exit_code != '0'
+      - name: Show resolved deps
+        working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
-          echo "::error::Flutter build failed (exit ${{ steps.build_apk.outputs.exit_code }})"
-          exit 1
+          echo "=== pubspec.yaml(deps heads) ==="
+          sed -n '1,200p' pubspec.yaml
+          echo "=== pubspec.lock (first 300 lines) ==="
+          sed -n '1,300p' pubspec.lock || true
+          echo "=== flutter pub deps (compact) ==="
+          flutter pub deps --style=compact || true
+
+      - name: Scan project/android for V1 markers (with line numbers)
+        id: scan_project
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="${{ steps.detect.outputs.project_dir }}"
+          PATTERN='io\.flutter\.app\.(Flutter(Application|Activity|FragmentActivity))|io\.flutter\.view\.FlutterMain|PluginRegistry(\.Registrar)?|GeneratedPluginRegistrant\.registerWith|registerWith\s*\(|ShimPluginRegistry|PluginRegistrantCallback'
+          echo "== Scan project android/ =="
+          (grep -RNI --include='*.java' --include='*.kt' --include='*.xml' -E "$PATTERN" "$DIR/android" || true) | tee project_v1_hits.txt
+
+      - name: Scan pub-cache for V1 markers (with line numbers)
+        id: scan_cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATTERN='io\.flutter\.app\.(Flutter(Application|Activity|FragmentActivity))|io\.flutter\.view\.FlutterMain|PluginRegistry(\.Registrar)?|GeneratedPluginRegistrant\.registerWith|registerWith\s*\(|ShimPluginRegistry|PluginRegistrantCallback'
+          echo "== Scan $HOME/.pub-cache =="
+          (grep -RNI --include='*.java' --include='*.kt' --include='*.xml' -E "$PATTERN" "$HOME/.pub-cache" || true) | tee pubcache_v1_hits.txt
+
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-scan-results
+          path: |
+            ${{ steps.detect.outputs.project_dir }}/pubspec.lock
+            project_v1_hits.txt
+            pubcache_v1_hits.txt
