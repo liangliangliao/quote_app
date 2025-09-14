@@ -100,12 +100,12 @@ jobs:
 
           # 2) 把 dependencies / dev_dependencies 的版本号全部改成 any
           python3 - "$PWD/pubspec.yaml" << 'PY'
-import sys,re,io
-p=sys.argv[1]
-txt=open(p,'r',encoding='utf-8').read().splitlines()
-out=[]
-in_deps=False
-in_dev=False
+          import sys,re,io
+          p=sys.argv[1]
+          txt=open(p,'r',encoding='utf-8').read().splitlines()
+          out=[]
+          in_deps=False
+          in_dev=False
 for line in txt:
     s=line.rstrip('\n')
     if re.match(r'^\s*dependencies:\s*$', s): in_deps=True; in_dev=False; out.append(s); continue
