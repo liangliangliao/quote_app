@@ -90,17 +90,17 @@ jobs:
           sed -n '1,200p' pubspec.yaml || true
 
           python3 - <<'PY'
-import re, pathlib
-p = pathlib.Path("pubspec.yaml")
-text = p.read_text(encoding="utf-8")
-lines = text.splitlines()
+          import re, pathlib
+           p = pathlib.Path("pubspec.yaml")
+           text = p.read_text(encoding="utf-8")
+           lines = text.splitlines()
 
-# ensure environment sdk
-if "environment:" not in text:
-    lines.append("environment:")
-    lines.append("  sdk: '>=3.5.0 <4.0.0'")
-else:
-    new=[]; i=0
+          # ensure environment sdk
+            if "environment:" not in text:
+            lines.append("environment:")
+            lines.append(" sdk: '>=3.5.0 <4.0.0'")
+           else:
+           new=[]; i=0
     while i < len(lines):
         if lines[i].strip().startswith("environment:"):
             new.append(lines[i]); i+=1
