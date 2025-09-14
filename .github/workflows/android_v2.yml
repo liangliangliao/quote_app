@@ -1,27 +1,59 @@
-name: Scan Android V1 Markers
+name: Android (V2 + Latest)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main, master ]
 
 jobs:
-  scan:
+  android:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: List repo
+        run: ls -lah
+
+      # === 新增 ①：若根目录没有 pubspec.yaml，则解压仓库里最新的 zip ===
+      - name: Unzip latest zip if no pubspec.yaml
+        id: unzip
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pubspec.yaml ]; then
+            echo "unzipped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
+          if [ -z "${SEL}" ]; then
+            SEL="$(find . -maxdepth 6 -type f -name '*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
+          fi
+          if [ -n "${SEL}" ]; then
+            echo "Found zip: ${SEL}"
+            unzip -q "${SEL}" -d .
+            echo "unzipped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No zip found and no pubspec.yaml."
+            echo "请提交包含 pubspec.yaml 的源码，或把源码 zip 放在仓库根目录（zip 内部不要多一层目录）。"
+            exit 66
+          fi
+
+      # === 新增 ②：定位 Flutter 工程目录（找到 pubspec.yaml 所在目录） ===
       - name: Detect Flutter project dir (find pubspec.yaml)
         id: detect
         shell: bash
         run: |
           set -euo pipefail
           DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
-          if [ -z "$DIR" ]; then
-            echo "❌ pubspec.yaml 未找到"; exit 66
+          if [ -z "${DIR}" ]; then
+            echo "❌ pubspec.yaml 未找到；请确认 zip 内部不是多层目录。"
+            exit 66
           fi
-          echo "project_dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "Project dir: $DIR"
+          DIR="${DIR#./}"
+          echo "project_dir=${DIR}" >> "$GITHUB_OUTPUT"
+          echo "✅ Detected Flutter project at: ${DIR}"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -34,61 +66,50 @@ jobs:
         with:
           flutter-version: '3.35.3'
           channel: stable
-          cache: false
+          cache: true
 
       - name: Clean ALL pub caches (fresh resolve)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
           flutter --version
+          flutter clean || true
           rm -rf "$HOME/.pub-cache" || true
           flutter pub cache clean || true
+          rm -f pubspec.lock || true
 
       - name: Flutter pub get (fresh)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          flutter clean || true
-          rm -f pubspec.lock || true
           flutter pub get
 
-      - name: Show resolved deps
+      # 你可以在此之上继续保留/追加原来已有的步骤（如修补 v2、诊断、升级依赖等）
+      # ========== 构建并抓取日志 ==========
+      - name: Build APK (capture logs)
+        id: buildapk
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
-          echo "=== pubspec.yaml(deps heads) ==="
-          sed -n '1,200p' pubspec.yaml
-          echo "=== pubspec.lock (first 300 lines) ==="
-          sed -n '1,300p' pubspec.lock || true
-          echo "=== flutter pub deps (compact) ==="
-          flutter pub deps --style=compact || true
+          set -euo pipefail
+          ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log )
 
-      - name: Scan project/android for V1 markers (with line numbers)
-        id: scan_project
+      - name: Annotate compiler errors
+        if: always()
+        working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          DIR="${{ steps.detect.outputs.project_dir }}"
-          PATTERN='io\.flutter\.app\.(Flutter(Application|Activity|FragmentActivity))|io\.flutter\.view\.FlutterMain|PluginRegistry(\.Registrar)?|GeneratedPluginRegistrant\.registerWith|registerWith\s*\(|ShimPluginRegistry|PluginRegistrantCallback'
-          echo "== Scan project android/ =="
-          (grep -RNI --include='*.java' --include='*.kt' --include='*.xml' -E "$PATTERN" "$DIR/android" || true) | tee project_v1_hits.txt
+          echo "=== Flutter build log (errors only) ==="
+          [ -f build_apk.log ] && grep -nE "(^e: |\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:|^ERROR|Android v1 embedding)" build_apk.log || true
 
-      - name: Scan pub-cache for V1 markers (with line numbers)
-        id: scan_cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          PATTERN='io\.flutter\.app\.(Flutter(Application|Activity|FragmentActivity))|io\.flutter\.view\.FlutterMain|PluginRegistry(\.Registrar)?|GeneratedPluginRegistrant\.registerWith|registerWith\s*\(|ShimPluginRegistry|PluginRegistrantCallback'
-          echo "== Scan $HOME/.pub-cache =="
-          (grep -RNI --include='*.java' --include='*.kt' --include='*.xml' -E "$PATTERN" "$HOME/.pub-cache" || true) | tee pubcache_v1_hits.txt
-
-      - name: Upload scan artifacts
+      - name: Upload artifacts (APK + logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v1-scan-results
+          name: app-and-logs
           path: |
-            ${{ steps.detect.outputs.project_dir }}/pubspec.lock
-            project_v1_hits.txt
-            pubcache_v1_hits.txt
+            ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+            ${{ steps.detect.outputs.project_dir }}/build_apk.log
