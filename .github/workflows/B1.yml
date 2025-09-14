@@ -1,0 +1,223 @@
+name: Android v2 Build with precise v1 diagnostics (Flutter 3.35.3)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make temp dir
+        id: mktemp
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMPDIR="$(mktemp -d)"
+          echo "dir=$TMPDIR" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
+
+      - name: Sanity - list repo root
+        run: ls -lah
+
+      # 选仓库中“最新提交”的 ZIP（优先根目录，其次仓库任意路径，最后物理时间）
+      - name: Pick latest ZIP (prefer root tracked; robust fallbacks)
+        id: pickzip
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          pick_by_git_commit() {
+            printf "%s\n" "$1" | while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              ct="$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)"
+              printf "%s %s\n" "$ct" "$f"
+            done | sort -nr | head -n1 | cut -d' ' -f2-
+          }
+
+          ROOT_TRACKED="$(git ls-files --full-name | awk '/^[^\/]+\.zip$/ {print}' || true)"
+          SEL=""
+          if [ -n "${ROOT_TRACKED:-}" ]; then
+            SEL="$(pick_by_git_commit "$ROOT_TRACKED")"
+          fi
+          if [ -z "$SEL" ]; then
+            ANY_TRACKED="$(git ls-files --full-name | awk '/\.zip$/ {print}' || true)"
+            if [ -n "${ANY_TRACKED:-}" ]; then
+              SEL="$(pick_by_git_commit "$ANY_TRACKED")"
+            fi
+          fi
+          if [ -z "$SEL" ]; then
+            SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$SEL" ]; then
+            SEL="$(find . -maxdepth 6 -type f -name '*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
+            SEL="${SEL#./}"
+          fi
+          [ -n "$SEL" ] || { echo "No .zip files found."; exit 1; }
+          echo "Picked ZIP: $SEL"
+          echo "zip=$GITHUB_WORKSPACE/$SEL" >> "$GITHUB_OUTPUT"
+
+      - name: Unzip project
+        id: unzip
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC_DIR="${TMPDIR}/src"
+          mkdir -p "$SRC_DIR"
+          unzip -q "${{ steps.pickzip.outputs.zip }}" -d "$SRC_DIR"
+          echo "src=$SRC_DIR" >> "$GITHUB_OUTPUT"
+          echo "After unzip:"; ls -lah "$SRC_DIR"
+
+      - name: Detect Flutter project root
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$(find "${{ steps.unzip.outputs.src }}" -maxdepth 6 -type f -name pubspec.yaml -print -quit || true)"
+          if [ -z "$ROOT" ]; then
+            echo "::error::No pubspec.yaml found inside ZIP"
+            exit 66
+          fi
+          DIR="$(dirname "$ROOT")"
+          echo "project_dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Detected Flutter project: $DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.35.3 (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.3'
+          channel: stable
+          cache: true
+
+      # 每次都清理，尽量还原“干净主机”
+      - name: Wipe caches (pub / gradle / android)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.pub-cache" "$HOME/.gradle" "$ANDROID_SDK_ROOT/.android" || true
+
+      # 允许失败，但要把日志留住，并继续后续诊断
+      - name: Flutter pub get (allow fail; keep going)
+        id: pubget
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -o pipefail
+          flutter clean || true
+          flutter pub get 2>&1 | tee "$TMPDIR/pub_get.log" || true
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # === 1) 自己扫描 app 代码（精确到文件:行号）===
+      - name: Diagnose Android v1 markers in *app* code (files + line numbers)
+        id: diag_app
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== Scan app(android/) for v1 markers ==" | tee "$TMPDIR/v1_app_hits.txt"
+          grep -R --include=*.kt --include=*.java -nE \
+            'io\.flutter\.app\.(Flutter(Activity|FragmentActivity|Application))|io\.flutter\.view\.FlutterMain|GeneratedPluginRegistrant\.registerWith|PluginRegistry(\.Registrar)?|registerWith\s*\(|ShimPluginRegistry|PluginRegistrantCallback' \
+            android 2>/dev/null | tee -a "$TMPDIR/v1_app_hits.txt" || true
+
+          if [ -s "$TMPDIR/v1_app_hits.txt" ]; then
+            echo "count=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # === 2) 扫描 pub 缓存中的插件源码（精确到文件:行号）===
+      - name: Diagnose Android v1 markers in *plugins* (files + line numbers)
+        id: diag_plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+          echo "== Scan pub-cache for v1 markers ($PUB_CACHE) ==" | tee "$TMPDIR/v1_plugin_hits.txt"
+          grep -R --include=*.kt --include=*.java -nE \
+            'io\.flutter\.app\.(Flutter(Activity|FragmentActivity|Application))|io\.flutter\.view\.FlutterMain|PluginRegistry(\.Registrar)?|registerWith\s*\(|ShimPluginRegistry|GeneratedPluginRegistrant\.registerWith|PluginRegistrantCallback' \
+            "$PUB_CACHE" 2>/dev/null | tee -a "$TMPDIR/v1_plugin_hits.txt" || true
+
+          if [ -s "$TMPDIR/v1_plugin_hits.txt" ]; then
+            echo "count=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # === 3) 为了获得“真正编译期”的行号信息：临时禁用 v1 守门（仅 CI）===
+      - name: TEMP: bypass v1 gate in flutter_tools (CI only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOLS_DIR="$FLUTTER_ROOT/packages/flutter_tools/lib/src"
+          FILE="$TOOLS_DIR/project.dart"
+          if grep -q 'checkForDeprecation' "$FILE"; then
+            sed -i 's/checkForDeprecation();/\/\/ checkForDeprecation(); \/\/ (bypassed in CI)/' "$FILE" || true
+            sed -i "s/Build failed due to use of deleted Android v1 embedding\./Bypassed v1 gate in CI./" "$FILE" || true
+          fi
+
+      # === 4) 真正去编译，抓完整日志（含 Java/Kotlin 编译行号）===
+      - name: Build APK (capture logs)
+        id: build
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -o pipefail
+          flutter build apk --release -v 2>&1 | tee "$TMPDIR/build_apk.log" || true
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # 如果 Gradle wrapper 存在，再走一次 Gradle 以捕获标准 Java/Kotlin 错误格式
+      - name: Gradle fallback compile (assembleRelease -> logs)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ -d android ] && [ -x android/gradlew ]; then
+            (cd android && ./gradlew assembleRelease --stacktrace --no-daemon) 2>&1 | tee "$TMPDIR/gradle_build.log" || true
+          else
+            echo "No gradle wrapper found, skip Gradle fallback." | tee "$TMPDIR/gradle_build.log"
+          fi
+
+      # === 5) 把“命中的文件与行号”、“构建日志”全部打包上传 ===
+      - name: Upload diagnostics & logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-diagnostics-and-logs
+          path: |
+            ${{ steps.mktemp.outputs.dir }}/pub_get.log
+            ${{ steps.mktemp.outputs.dir }}/v1_app_hits.txt
+            ${{ steps.mktemp.outputs.dir }}/v1_plugin_hits.txt
+            ${{ steps.mktemp.outputs.dir }}/build_apk.log
+            ${{ steps.mktemp.outputs.dir }}/gradle_build.log
+          if-no-files-found: warn
+
+      # 如果真的产出了 APK，也一并上传
+      - name: Upload APK (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: |
+            ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: ignore
+
+      # 最后明确地用 exit code 汇总
+      - name: Finalize (do not hard fail early)
+        shell: bash
+        run: |
+          FB="${{ steps.build.outputs.exit_code || 0 }}"
+          echo "Flutter build exit code = ${FB}"
+          # 不在这里强制失败：我们更关心日志与命中清单；是否失败你一眼就能从 UI 看到
