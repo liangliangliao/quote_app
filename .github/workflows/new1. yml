@@ -1,0 +1,256 @@
+name: Android (V2 + All Latest)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx6g -XX:MaxMetaspaceSize=1g"
+      JAVA_TOOL_OPTIONS: "-Xms512m -Xmx2048m"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sanity - list repo root
+        run: ls -lah
+
+      # 如果仓库里放的是 zip，这一步会挑最近的 zip 并解开
+      - name: (Optional) pick & unzip latest zip
+        id: pickzip
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pubspec.yaml ]; then
+            echo "zipmode=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
+          if [ -z "$SEL" ]; then
+            SEL="$(find . -maxdepth 4 -type f -name '*.zip' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2- || true)"
+          fi
+          if [ -n "$SEL" ]; then
+            echo "zipmode=true" >> $GITHUB_OUTPUT
+            echo "zip=$SEL" >> $GITHUB_OUTPUT
+            echo "Unzipping: $SEL"
+            unzip -q "$SEL" -d .
+          else
+            echo "zipmode=false" >> $GITHUB_OUTPUT
+          fi
+          echo "After unzip:"; ls -lah
+
+      # 找 pubspec.yaml（支持放在子目录）
+      - name: Detect Flutter project dir
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
+          if [ -z "$DIR" ]; then
+            echo "❌ Not a Flutter repo: pubspec.yaml not found."
+            exit 66
+          fi
+          echo "project_dir=$DIR" >> $GITHUB_OUTPUT
+          echo "Found Flutter project at: $DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter (latest stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # —— 强制“干净环境” —— #
+      - name: Nuke caches (flutter build + pub cache)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter clean || true
+          rm -rf "$HOME/.pub-cache" || true
+          flutter pub cache clean || true
+
+      # —— 改 pubspec.yaml：把所有版本号去掉（= any），并升级 environment —— #
+      - name: Rewrite pubspec to "any" (no constraints) & modern environment
+        id: rewrite_pubspec
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== Before =="
+          sed -n '1,200p' pubspec.yaml || true
+
+          # 1) environment 升到 Dart 3.5+，Flutter 3.22+ 匹配“最新”
+          awk '
+            BEGIN{envdone=0}
+            /^environment:/ {print; getline;
+              if ($0 ~ /sdk:/) { print "  sdk: \">=3.5.0 <4.0.0\""; envdone=1; next }
+            }
+            {print}
+            END{if(envdone==0) print "environment:\n  sdk: \">=3.5.0 <4.0.0\""}
+          ' pubspec.yaml > pubspec.__tmp__ && mv pubspec.__tmp__ pubspec.yaml
+
+          # 2) 把 dependencies / dev_dependencies 的版本号全部改成 any
+          python3 - "$PWD/pubspec.yaml" << 'PY'
+import sys,re,io
+p=sys.argv[1]
+txt=open(p,'r',encoding='utf-8').read().splitlines()
+out=[]
+in_deps=False
+in_dev=False
+for line in txt:
+    s=line.rstrip('\n')
+    if re.match(r'^\s*dependencies:\s*$', s): in_deps=True; in_dev=False; out.append(s); continue
+    if re.match(r'^\s*dev_dependencies:\s*$', s): in_deps=False; in_dev=True; out.append(s); continue
+    if re.match(r'^\s*\w', s): in_deps=False; in_dev=False
+    # 形如 "xxx: ^1.2.3" / "xxx: 1.2.3" / "xxx: any" -> 改为 "xxx: any"
+    if (in_deps or in_dev) and re.search(r':\s*[\^~]?\d', s):
+        s=re.sub(r':\s*.+$', ': any', s)
+    out.append(s)
+open(p,'w',encoding='utf-8').write('\n'.join(out))
+PY
+
+          echo "== After =="
+          sed -n '1,200p' pubspec.yaml || true
+
+      - name: flutter pub upgrade (major)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          flutter pub upgrade --major-versions
+          flutter pub get
+          flutter pub deps --style=compact || true
+
+      # —— Android 侧：把 Gradle/AGP/Kotlin/SDK 统统拉到新线 —— #
+      - name: Patch Android to latest toolchain (AGP/Kotlin/SDK/Wrapper)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d android ]; then
+            echo "No android/ folder, skip."
+            exit 0
+          fi
+
+          APP=android/app/build.gradle
+          if [ -f "$APP" ]; then
+            # compile/target/minSdk 统一抬高（大部分新包要求 21+；这里给到 23 更保险）
+            sed -i -E 's/compileSdk\s*=\s*[0-9]+/compileSdk = 35/g' "$APP" || true
+            sed -i -E 's/targetSdk\s*=\s*[0-9]+/targetSdk = 35/g' "$APP" || true
+            sed -i -E 's/minSdk\s*=\s*[0-9]+/minSdk = 23/g' "$APP" || true
+            # 旧式 android { defaultConfig { } } 写法
+            sed -i -E 's/compileSdkVersion\s+[0-9]+/compileSdkVersion 35/g' "$APP" || true
+            sed -i -E 's/targetSdkVersion\s+[0-9]+/targetSdkVersion 35/g' "$APP" || true
+            sed -i -E 's/minSdkVersion\s+[0-9]+/minSdkVersion 23/g' "$APP" || true
+          fi
+
+          # Kotlin、AGP（新式 settings.gradle 的 plugins DSL）
+          SETTINGS=android/settings.gradle
+          if grep -q 'dev.flutter.flutter-plugin-loader' "$SETTINGS" 2>/dev/null; then
+            # 保留 flutter 插件，追加最新 AGP/Kotlin（true 表示应用到根工程）
+            awk '
+              BEGIN{printed=0}
+              {print}
+              END{
+                print ""
+                print "plugins {"
+                print "  id(\"com.android.application\") version \"8.3.1\" apply false"
+                print "  id(\"org.jetbrains.kotlin.android\") version \"1.9.24\" apply false"
+                print "}"
+              }' "$SETTINGS" > android/settings.__tmp__ && mv android/settings.__tmp__ "$SETTINGS"
+          fi
+
+          # Gradle wrapper -> 8.7（与 AGP8.3 兼容）
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i -E 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip#g' android/gradle/wrapper/gradle-wrapper.properties
+          fi
+
+          # Manifest 追加 V2 标记 & Android 13+ 通知权限 & 精准闹钟权限
+          for M in $(git ls-files 'android/**/AndroidManifest.xml' 2>/dev/null); do
+            # 清掉旧 v1 Application
+            sed -i 's/android:name="io\.flutter\.app\.FlutterApplication"//g' "$M" || true
+            # 添加 <meta-data name="flutterEmbedding" value="2"/>
+            if ! grep -q 'flutterEmbedding' "$M"; then
+              awk '{print} /<application[^>]*>/ && !i {print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\"/>"; i=1}' "$M" > "$M.__tmp__" && mv "$M.__tmp__" "$M"
+            fi
+          done
+
+          MAIN=android/app/src/main/AndroidManifest.xml
+          if [ -f "$MAIN" ]; then
+            # Android 13+ 通知权限
+            if ! grep -q 'POST_NOTIFICATIONS' "$MAIN"; then
+              awk '{print} /<manifest[^>]*>/ && !i {print "    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>"; i=1}' "$MAIN" > "$MAIN.__tmp__" && mv "$MAIN.__tmp__" "$MAIN"
+            fi
+            # 精准闹钟（如果你用 android_alarm_manager_plus / 精准计划任务）
+            if ! grep -q 'SCHEDULE_EXACT_ALARM' "$MAIN"; then
+              awk '{print} /<manifest[^>]*>/ && !j {print "    <uses-permission android:name=\"android.permission.SCHEDULE_EXACT_ALARM\"/>"; j=1}' "$MAIN" > "$MAIN.__tmp__" && mv "$MAIN.__tmp__" "$MAIN"
+            fi
+          fi
+
+          # MainActivity 一律使用 V2 Activity
+          MA_KT=$(git ls-files 'android/app/src/**/MainActivity.kt' | head -n1 || true)
+          MA_JAVA=$(git ls-files 'android/app/src/**/MainActivity.java' | head -n1 || true)
+          if [ -n "$MA_KT" ]; then
+            sed -i 's#io\.flutter\.app\.FlutterActivity#io.flutter.embedding.android.FlutterActivity#g' "$MA_KT" || true
+            sed -i 's#class MainActivity.*#class MainActivity: FlutterActivity()#g' "$MA_KT" || true
+          fi
+          if [ -n "$MA_JAVA" ]; then
+            sed -i 's#io\.flutter\.app\.FlutterActivity#io.flutter.embedding.android.FlutterActivity#g' "$MA_JAVA" || true
+          fi
+
+      # —— 构建 & 捕获详细日志 —— #
+      - name: Build APK (capture logs)
+        id: buildapk
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Flutter 详细日志
+          ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log )
+          echo "apk_result=$?" >> $GITHUB_OUTPUT || true
+
+      # Gradle 备用路径：如果 Flutter 的 early-fail 拦住了，直接跑 Gradle 看具体编译错误
+      - name: Gradle fallback compile (assembleRelease -> capture)
+        if: failure()
+        working-directory: ${{ steps.detect.outputs.project_dir }}/android
+        shell: bash
+        run: |
+          set -o pipefail
+          if [[ -x "./gradlew" ]]; then
+            ./gradlew --version
+            ( ./gradlew :app:assembleRelease --stacktrace --no-daemon 2>&1 | tee ../gradle_build.log ) || true
+          fi
+
+      # —— 从日志里标注“文件:行号:错误” —— #
+      - name: Annotate compiler errors (from flutter & gradle logs)
+        if: always()
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Annotating from Flutter log ==="
+          if [ -f build_apk.log ]; then
+            grep -nE "(^e: |^/home/runner/|\.kt:|\.java:|\.gradle:|^FAILURE:)" build_apk.log || true
+          fi
+          echo "=== Annotating from Gradle log ==="
+          if [ -f gradle_build.log ]; then
+            grep -nE "(: error:|\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
+          fi
+
+      - name: Upload APK (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: |
+            ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+            ${{ steps.detect.outputs.project_dir }}/build_apk.log
+            ${{ steps.detect.outputs.project_dir }}/gradle_build.log
