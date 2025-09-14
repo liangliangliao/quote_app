@@ -1,4 +1,4 @@
-name: Android (V2 + Latest)
+name: Android (scan V1 and build)
 
 on:
   workflow_dispatch:
@@ -16,44 +16,35 @@ jobs:
       - name: List repo
         run: ls -lah
 
-      # === 新增 ①：若根目录没有 pubspec.yaml，则解压仓库里最新的 zip ===
       - name: Unzip latest zip if no pubspec.yaml
         id: unzip
         shell: bash
         run: |
           set -euo pipefail
           if [ -f pubspec.yaml ]; then
-            echo "unzipped=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "unzipped=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
           if [ -z "${SEL}" ]; then
             SEL="$(find . -maxdepth 6 -type f -name '*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
           fi
           if [ -n "${SEL}" ]; then
-            echo "Found zip: ${SEL}"
             unzip -q "${SEL}" -d .
             echo "unzipped=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No zip found and no pubspec.yaml."
-            echo "请提交包含 pubspec.yaml 的源码，或把源码 zip 放在仓库根目录（zip 内部不要多一层目录）。"
-            exit 66
+            echo "❌ 没有 pubspec.yaml，也没有 zip"; exit 66
           fi
 
-      # === 新增 ②：定位 Flutter 工程目录（找到 pubspec.yaml 所在目录） ===
       - name: Detect Flutter project dir (find pubspec.yaml)
         id: detect
         shell: bash
         run: |
           set -euo pipefail
           DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
-          if [ -z "${DIR}" ]; then
-            echo "❌ pubspec.yaml 未找到；请确认 zip 内部不是多层目录。"
-            exit 66
-          fi
+          [ -n "$DIR" ] || { echo "❌ 未找到 pubspec.yaml"; exit 66; }
           DIR="${DIR#./}"
           echo "project_dir=${DIR}" >> "$GITHUB_OUTPUT"
-          echo "✅ Detected Flutter project at: ${DIR}"
+          echo "Project: $DIR"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -73,7 +64,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          flutter --version
           flutter clean || true
           rm -rf "$HOME/.pub-cache" || true
           flutter pub cache clean || true
@@ -82,12 +72,30 @@ jobs:
       - name: Flutter pub get (fresh)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
+        run: flutter pub get
+
+      - name: Scan project/android for V1 markers (with line numbers)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
         run: |
           set -euo pipefail
-          flutter pub get
+          echo "=== Scan your app's android/ sources ==="
+          grep -RIn --include=*.{kt,java,xml} \
+            -E 'io\.flutter\.app\.(FlutterActivity|FragmentActivity|FlutterApplication)|io\.flutter\.view\.FlutterMain|GeneratedPluginRegistrant\.registerWith|PluginRegistry(\.Registrar)?|ShimPluginRegistry|PluginRegistrantCallback' \
+            android || true
+          echo "=== Scan manifests for V1 application tag ==="
+          grep -RIn --include=AndroidManifest.xml 'io\.flutter\.app\.FlutterApplication|flutterEmbedding' android || true
 
-      # 你可以在此之上继续保留/追加原来已有的步骤（如修补 v2、诊断、升级依赖等）
-      # ========== 构建并抓取日志 ==========
+      - name: Scan pub-cache for V1 markers (with line numbers)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUB="${PUB_CACHE:-$HOME/.pub-cache}"
+          echo "=== Scan downloaded plugins in: $PUB ==="
+          grep -RIn --include=*.{kt,java} \
+            -E 'io\.flutter\.app\.(FlutterActivity|FragmentActivity|FlutterApplication)|io\.flutter\.view\.FlutterMain|GeneratedPluginRegistrant\.registerWith|PluginRegistry(\.Registrar)?|ShimPluginRegistry|PluginRegistrantCallback' \
+            "$PUB" 2>/dev/null || true
+
       - name: Build APK (capture logs)
         id: buildapk
         working-directory: ${{ steps.detect.outputs.project_dir }}
@@ -103,7 +111,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Flutter build log (errors only) ==="
-          [ -f build_apk.log ] && grep -nE "(^e: |\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:|^ERROR|Android v1 embedding)" build_apk.log || true
+          [ -f build_apk.log ] && grep -nE "(^e: |\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:|Android v1 embedding)" build_apk.log || true
 
       - name: Upload artifacts (APK + logs)
         if: always()
