@@ -3,7 +3,7 @@ name: Android (V2 + All Latest)
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
   android:
@@ -16,18 +16,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sanity - list repo root
+      - name: List repo
         run: ls -lah
 
-      # 如果根目录没有 pubspec.yaml，就自动挑最新 zip 解压
-      - name: (Optional) Pick & unzip latest zip
+      - name: Optional unzip latest zip if no pubspec
         id: pickzip
         shell: bash
         run: |
           set -euo pipefail
           if [ -f pubspec.yaml ]; then
-            echo "zipmode=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "zipmode=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
           if [ -z "${SEL}" ]; then
@@ -36,40 +34,36 @@ jobs:
           if [ -n "${SEL}" ]; then
             echo "zipmode=true" >> "$GITHUB_OUTPUT"
             echo "zip=${SEL}" >> "$GITHUB_OUTPUT"
-            echo "Unzipping: ${SEL}"
             unzip -q "${SEL}" -d .
           else
             echo "zipmode=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "After unzip:"; ls -lah
 
-      - name: Detect Flutter project dir
+      - name: Detect flutter project dir
         id: detect
         shell: bash
         run: |
           set -euo pipefail
           DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
           if [ -z "${DIR}" ]; then
-            echo "Not a Flutter repo: pubspec.yaml not found."
-            exit 66
+            echo "pubspec.yaml not found"; exit 66
           fi
           echo "project_dir=${DIR}" >> "$GITHUB_OUTPUT"
-          echo "Found Flutter project at: ${DIR}"
+          echo "Project: ${DIR}"
 
-      - name: Set up JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter (latest stable)
+      - name: Setup Flutter (stable latest)
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # —— 保证干净解析：清理构建与 pub 缓存 —— #
-      - name: Nuke caches (flutter build + pub cache)
+      - name: Clean caches
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
@@ -80,57 +74,45 @@ jobs:
           flutter pub cache clean || true
           rm -f pubspec.lock || true
 
-      # —— 改 pubspec：去掉所有版本号（改为 any），并设置 Dart SDK >=3.5 —— #
-      - name: Rewrite pubspec to "any" & modern environment
+      - name: Rewrite pubspec to any and modern SDK
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "== BEFORE pubspec.yaml =="
-          sed -n '1,200p' pubspec.yaml || true
+          echo "=== BEFORE ==="; sed -n '1,200p' pubspec.yaml || true
+          rm -f _rewrite.py
+          printf '%s\n' \
+          'import re, pathlib' \
+          'p = pathlib.Path("pubspec.yaml")' \
+          'text = p.read_text(encoding="utf-8")' \
+          'lines = text.splitlines()' \
+          'if "environment:" not in text:' \
+          '  lines.append("environment:")' \
+          '  lines.append("  sdk: \'>=3.5.0 <4.0.0\'")' \
+          'else:' \
+          '  new=[]; i=0' \
+          '  while i < len(lines):' \
+          '    if lines[i].strip().startswith("environment:"):' \
+          '      new.append(lines[i]); i+=1; seen=False' \
+          '      while i < len(lines) and (lines[i].startswith(" ") or lines[i].strip()==""):' \
+          '        if lines[i].strip().startswith("sdk:"): lines[i]="  sdk: \'>=3.5.0 <4.0.0\'"; seen=True' \
+          '        new.append(lines[i]); i+=1' \
+          '      if not seen: new.append("  sdk: \'>=3.5.0 <4.0.0\'")' \
+          '      new.extend(lines[i:]); lines=new; break' \
+          '    i+=1' \
+          'out=[]; ctx=None' \
+          'for ln in lines:' \
+          '  if re.match(r"^\\s*dependencies:\\s*$", ln): ctx="dep"; out.append(ln); continue' \
+          '  if re.match(r"^\\s*dev_dependencies:\\s*$", ln): ctx="dev"; out.append(ln); continue' \
+          '  if re.match(r"^\\s*\\w", ln): ctx=None' \
+          '  if ctx in ("dep","dev") and re.search(r":\\s*[\\^~]?\\d", ln): ln = re.sub(r":\\s*[^#]+", ": any", ln)' \
+          '  out.append(ln)' \
+          'p.write_text("\\n".join(out), encoding="utf-8")' \
+          > _rewrite.py
+          python3 _rewrite.py
+          echo "=== AFTER ==="; sed -n '1,200p' pubspec.yaml || true
 
-          python3 - <<'PY'
-          import re, pathlib
-           p = pathlib.Path("pubspec.yaml")
-           text = p.read_text(encoding="utf-8")
-           lines = text.splitlines()
-
-          # ensure environment sdk
-            if "environment:" not in text:
-            lines.append("environment:")
-            lines.append(" sdk: '>=3.5.0 <4.0.0'")
-           else:
-           new=[]; i=0
-    while i < len(lines):
-        if lines[i].strip().startswith("environment:"):
-            new.append(lines[i]); i+=1
-            seen=False
-            while i < len(lines) and (lines[i].startswith(" ") or lines[i].strip()==""):
-                if lines[i].strip().startswith("sdk:"):
-                    lines[i] = "  sdk: '>=3.5.0 <4.0.0'"; seen=True
-                new.append(lines[i]); i+=1
-            if not seen:
-                new.append("  sdk: '>=3.5.0 <4.0.0'")
-            new.extend(lines[i:]); lines=new; break
-        i+=1
-
-# wipe versions in dependencies & dev_dependencies
-out=[]; ctx=None
-for ln in lines:
-    if re.match(r'^\s*dependencies:\s*$', ln): ctx="dep"; out.append(ln); continue
-    if re.match(r'^\s*dev_dependencies:\s*$', ln): ctx="dev"; out.append(ln); continue
-    if re.match(r'^\s*\w', ln): ctx=None
-    if ctx in ("dep","dev") and re.search(r':\s*[\^~]?\d', ln):
-        ln = re.sub(r':\s*[^#]+', ': any', ln)
-    out.append(ln)
-
-p.write_text("\n".join(out), encoding="utf-8")
-PY
-
-          echo "== AFTER pubspec.yaml =="
-          sed -n '1,200p' pubspec.yaml || true
-
-      - name: flutter pub upgrade (major)
+      - name: Pub upgrade
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
@@ -139,34 +121,22 @@ PY
           flutter pub get
           flutter pub deps --style=compact || true
 
-      # —— Android 侧：升级到新工具链 + V2 修补 —— #
-      - name: Patch Android to latest toolchain (AGP/Kotlin/SDK/Wrapper + V2 embedding)
+      - name: Patch Android toolchain and V2
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -d android ]; then
-            echo "No android/ folder, skip Android patch."
-            exit 0
-          fi
+          [ -d android ] || { echo "no android folder"; exit 0; }
 
           APP="android/app/build.gradle"
           if [ -f "$APP" ]; then
-            # 保证 plugins DSL 存在且包含必要插件
             if ! grep -q 'plugins {' "$APP"; then
-              {
-                echo 'plugins {'
-                echo '  id "com.android.application"'
-                echo '  id "org.jetbrains.kotlin.android"'
-                echo '  id "dev.flutter.flutter-gradle-plugin"'
-                echo '}'
-              } | cat - "$APP" > "$APP.__tmp__" && mv "$APP.__tmp__" "$APP"
+              { echo 'plugins {'; echo '  id "com.android.application"'; echo '  id "org.jetbrains.kotlin.android"'; echo '  id "dev.flutter.flutter-gradle-plugin"'; echo '}'; } | cat - "$APP" > "$APP.__tmp__" && mv "$APP.__tmp__" "$APP"
             else
               grep -q 'com.android.application' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "com.android.application"/}' "$APP"
               grep -q 'org.jetbrains.kotlin.android' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "org.jetbrains.kotlin.android"/}' "$APP"
               grep -q 'dev.flutter.flutter-gradle-plugin' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin"/}' "$APP"
             fi
-            # SDK 等级（兼容两种写法）
             sed -i -E 's/compileSdk\s*=?\s*[0-9]+/compileSdk 35/g' "$APP" || true
             sed -i -E 's/compileSdkVersion\s+[0-9]+/compileSdkVersion 35/g' "$APP" || true
             sed -i -E 's/minSdk\s*=?\s*[0-9]+/minSdk 23/g' "$APP" || true
@@ -193,7 +163,6 @@ PY
             sed -i -E 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip#g' android/gradle/wrapper/gradle-wrapper.properties
           fi
 
-          # Manifest：移除 v1 Application、补 V2 标记 + 常用权限
           find android/app/src -type f -name AndroidManifest.xml | while read -r M; do
             sed -i 's/android:name="io\.flutter\.app\.FlutterApplication"//g' "$M" || true
             if ! grep -q 'flutterEmbedding' "$M"; then
@@ -209,19 +178,15 @@ PY
             fi
           done
 
-          # MainActivity 保证 V2
           MA_KT="$(find android/app/src -type f -name MainActivity.kt | head -n1 || true)"
           MA_JAVA="$(find android/app/src -type f -name MainActivity.java | head -n1 || true)"
           if [ -n "${MA_KT}" ]; then
             sed -i 's#io\.flutter\.app\.FlutterActivity#io.flutter.embedding.android.FlutterActivity#g' "${MA_KT}" || true
-            if grep -q '^class MainActivity' "${MA_KT}"; then
-              sed -i -E 's/^class\s+MainActivity.*$/class MainActivity: FlutterActivity()/' "${MA_KT}" || true
-            fi
+            grep -q '^class MainActivity' "${MA_KT}" && sed -i -E 's/^class\s+MainActivity.*$/class MainActivity: FlutterActivity()/' "${MA_KT}" || true
           elif [ -n "${MA_JAVA}" ]; then
             sed -i 's#io\.flutter\.app\.FlutterActivity#io.flutter.embedding.android.FlutterActivity#g' "${MA_JAVA}" || true
           fi
 
-      # —— 构建并捕获完整日志 —— #
       - name: Build APK (capture logs)
         id: buildapk
         working-directory: ${{ steps.detect.outputs.project_dir }}
@@ -230,34 +195,32 @@ PY
           set -euo pipefail
           ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log )
 
-      # Flutter 早期失败就尝试 Gradle 看具体文件/行号
-      - name: Gradle fallback compile (assembleRelease -> capture)
+      - name: Gradle fallback assembleRelease
         if: failure()
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
         shell: bash
         run: |
           set -o pipefail
           if [[ -x "./gradlew" ]]; then
-            ./gradlew --version
             ( ./gradlew :app:assembleRelease --stacktrace --no-daemon 2>&1 | tee ../gradle_build.log ) || true
           fi
 
-      - name: Annotate compiler errors (from flutter & gradle logs)
+      - name: Annotate compiler errors
         if: always()
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "=== Snippets from Flutter log ==="
+          echo "=== Flutter build log ==="
           [ -f build_apk.log ] && grep -nE "(^e: |\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" build_apk.log || true
-          echo "=== Snippets from Gradle log ==="
+          echo "=== Gradle build log ==="
           [ -f gradle_build.log ] && grep -nE "(: error:|\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
 
-      - name: Upload artifacts (APK & logs)
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-and-logs
+          name: app-and-logs
           path: |
             ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
             ${{ steps.detect.outputs.project_dir }}/build_apk.log
