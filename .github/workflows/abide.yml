@@ -19,7 +19,7 @@ jobs:
       - name: Sanity - list repo root
         run: ls -lah
 
-      # 如果仓库根没有 pubspec.yaml，自动挑最新 zip 解压
+      # 如果根目录没有 pubspec.yaml，就自动挑最新 zip 解压
       - name: (Optional) Pick & unzip latest zip
         id: pickzip
         shell: bash
@@ -80,7 +80,7 @@ jobs:
           flutter pub cache clean || true
           rm -f pubspec.lock || true
 
-      # —— 改 pubspec：去掉所有版本号（= any），并设置 Dart SDK >=3.5 —— #
+      # —— 改 pubspec：去掉所有版本号（改为 any），并设置 Dart SDK >=3.5 —— #
       - name: Rewrite pubspec to "any" & modern environment
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
@@ -89,55 +89,42 @@ jobs:
           echo "== BEFORE pubspec.yaml =="
           sed -n '1,200p' pubspec.yaml || true
 
-          python3 - << 'PY'
-          import re, sys, io
-          p = "pubspec.yaml"
-          s = open(p,'r',encoding='utf-8').read().splitlines()
-          out=[]
-          in_deps=False
-          in_dev=False
-          saw_env=False
-           wrote_sdk=False
-           for line in s:
-    if line.strip().startswith('environment:'):
-        saw_env=True
-     out.append(line)
-# 若没有 environment，追加
-if not saw_env:
-    out.append('environment:')
-# 规范 environment.sdk
-for i in range(len(out)):
-    if out[i].strip().startswith('environment:'):
-        # 查找下一行是否有 sdk:
-        j=i+1
-        found=False
-        while j<len(out) and (out[j].startswith(' ') or out[j].strip()== ''):
-            if out[j].strip().startswith('sdk:'):
-                out[j] = '  sdk: \'>=3.5.0 <4.0.0\''
-                found=True
-                break
-            j+=1
-        if not found:
-            out.insert(i+1, '  sdk: \'>=3.5.0 <4.0.0\'')
-        break
+          python3 - <<'PY'
+import re, pathlib
+p = pathlib.Path("pubspec.yaml")
+text = p.read_text(encoding="utf-8")
+lines = text.splitlines()
 
-# 去掉 dependencies / dev_dependencies 内的版本号（改为 any）
-res=[]
-in_deps=False
-in_dev=False
-for line in out:
-    l = line.rstrip('\n')
-    if re.match(r'^\s*dependencies:\s*$', l):
-        in_deps=True; in_dev=False; res.append(l); continue
-    if re.match(r'^\s*dev_dependencies:\s*$', l):
-        in_deps=False; in_dev=True; res.append(l); continue
-    if re.match(r'^\s*\w', l):
-        in_deps=False; in_dev=False
-    if (in_deps or in_dev) and re.search(r':\s*[\^~]?\d', l):
-        l = re.sub(r':\s*.+$', ': any', l)
-    res.append(l)
+# ensure environment sdk
+if "environment:" not in text:
+    lines.append("environment:")
+    lines.append("  sdk: '>=3.5.0 <4.0.0'")
+else:
+    new=[]; i=0
+    while i < len(lines):
+        if lines[i].strip().startswith("environment:"):
+            new.append(lines[i]); i+=1
+            seen=False
+            while i < len(lines) and (lines[i].startswith(" ") or lines[i].strip()==""):
+                if lines[i].strip().startswith("sdk:"):
+                    lines[i] = "  sdk: '>=3.5.0 <4.0.0'"; seen=True
+                new.append(lines[i]); i+=1
+            if not seen:
+                new.append("  sdk: '>=3.5.0 <4.0.0'")
+            new.extend(lines[i:]); lines=new; break
+        i+=1
 
-open(p,'w',encoding='utf-8').write('\n'.join(res))
+# wipe versions in dependencies & dev_dependencies
+out=[]; ctx=None
+for ln in lines:
+    if re.match(r'^\s*dependencies:\s*$', ln): ctx="dep"; out.append(ln); continue
+    if re.match(r'^\s*dev_dependencies:\s*$', ln): ctx="dev"; out.append(ln); continue
+    if re.match(r'^\s*\w', ln): ctx=None
+    if ctx in ("dep","dev") and re.search(r':\s*[\^~]?\d', ln):
+        ln = re.sub(r':\s*[^#]+', ': any', ln)
+    out.append(ln)
+
+p.write_text("\n".join(out), encoding="utf-8")
 PY
 
           echo "== AFTER pubspec.yaml =="
@@ -165,21 +152,21 @@ PY
 
           APP="android/app/build.gradle"
           if [ -f "$APP" ]; then
-            # 插件 DSL 确保存在
+            # 保证 plugins DSL 存在且包含必要插件
             if ! grep -q 'plugins {' "$APP"; then
-              printf '%s\n%s\n\n' 'plugins {' '  id "com.android.application"' > android/app/__tmp_plugins__
-              printf '%s\n' '  id "org.jetbrains.kotlin.android"' >> android/app/__tmp_plugins__
-              printf '%s\n%s\n' '  id "dev.flutter.flutter-gradle-plugin"' '}' >> android/app/__tmp_plugins__
-              cat android/app/__tmp_plugins__ "$APP" > android/app/__tmp_build__
-              mv android/app/__tmp_build__ "$APP"
-              rm -f android/app/__tmp_plugins__
+              {
+                echo 'plugins {'
+                echo '  id "com.android.application"'
+                echo '  id "org.jetbrains.kotlin.android"'
+                echo '  id "dev.flutter.flutter-gradle-plugin"'
+                echo '}'
+              } | cat - "$APP" > "$APP.__tmp__" && mv "$APP.__tmp__" "$APP"
             else
-              # 追加缺失的插件 id
-              sed -i '0,/plugins\s*{/{/plugins\s*{/!b;:a;n;/}/b;H;};${x;/com\.android\.application/!s/^{/&\n  id "com.android.application"/;p;d}' "$APP" || true
-              sed -i '0,/plugins\s*{/{/plugins\s*{/!b;:a;n;/}/b;H;};${x;/org\.jetbrains\.kotlin\.android/!s/^{/&\n  id "org.jetbrains.kotlin.android"/;p;d}' "$APP" || true
-              sed -i '0,/plugins\s*{/{/plugins\s*{/!b;:a;n;/}/b;H;};${x;/dev\.flutter\.flutter-gradle-plugin/!s/^{/&\n  id "dev.flutter.flutter-gradle-plugin"/;p;d}' "$APP" || true
+              grep -q 'com.android.application' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "com.android.application"/}' "$APP"
+              grep -q 'org.jetbrains.kotlin.android' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "org.jetbrains.kotlin.android"/}' "$APP"
+              grep -q 'dev.flutter.flutter-gradle-plugin' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin"/}' "$APP"
             fi
-            # SDK 等级（兼容新旧写法）
+            # SDK 等级（兼容两种写法）
             sed -i -E 's/compileSdk\s*=?\s*[0-9]+/compileSdk 35/g' "$APP" || true
             sed -i -E 's/compileSdkVersion\s+[0-9]+/compileSdkVersion 35/g' "$APP" || true
             sed -i -E 's/minSdk\s*=?\s*[0-9]+/minSdk 23/g' "$APP" || true
@@ -222,12 +209,11 @@ PY
             fi
           done
 
-          # MainActivity 保证 v2
+          # MainActivity 保证 V2
           MA_KT="$(find android/app/src -type f -name MainActivity.kt | head -n1 || true)"
           MA_JAVA="$(find android/app/src -type f -name MainActivity.java | head -n1 || true)"
           if [ -n "${MA_KT}" ]; then
             sed -i 's#io\.flutter\.app\.FlutterActivity#io.flutter.embedding.android.FlutterActivity#g' "${MA_KT}" || true
-            # 若类头不是 v2 写法，粗放替换（安全起见仅在匹配到 class MainActivity 时替换）
             if grep -q '^class MainActivity' "${MA_KT}"; then
               sed -i -E 's/^class\s+MainActivity.*$/class MainActivity: FlutterActivity()/' "${MA_KT}" || true
             fi
@@ -244,7 +230,7 @@ PY
           set -euo pipefail
           ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log )
 
-      # 如果 Flutter 早期失败，尝试直接用 Gradle 看编译期文件/行号
+      # Flutter 早期失败就尝试 Gradle 看具体文件/行号
       - name: Gradle fallback compile (assembleRelease -> capture)
         if: failure()
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
@@ -256,7 +242,6 @@ PY
             ( ./gradlew :app:assembleRelease --stacktrace --no-daemon 2>&1 | tee ../gradle_build.log ) || true
           fi
 
-      # —— 从日志里标注“文件:行号:错误” —— #
       - name: Annotate compiler errors (from flutter & gradle logs)
         if: always()
         working-directory: ${{ steps.detect.outputs.project_dir }}
@@ -264,13 +249,9 @@ PY
         run: |
           set -euo pipefail
           echo "=== Snippets from Flutter log ==="
-          if [ -f build_apk.log ]; then
-            grep -nE "(^e: |^/home/runner/|\\.kt:|\\.java:|\\.gradle:|^FAILURE:)" build_apk.log || true
-          fi
+          [ -f build_apk.log ] && grep -nE "(^e: |\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" build_apk.log || true
           echo "=== Snippets from Gradle log ==="
-          if [ -f gradle_build.log ]; then
-            grep -nE "(: error:|\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
-          fi
+          [ -f gradle_build.log ] && grep -nE "(: error:|\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
 
       - name: Upload artifacts (APK & logs)
         if: always()
