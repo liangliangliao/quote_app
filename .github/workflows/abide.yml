@@ -1,4 +1,4 @@
-name: Android (V2 + All Latest)
+name: Android (V2 minimal, parse-safe)
 
 on:
   workflow_dispatch:
@@ -8,9 +8,6 @@ on:
 jobs:
   android:
     runs-on: ubuntu-latest
-    env:
-      GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx6g -XX:MaxMetaspaceSize=1g"
-      JAVA_TOOL_OPTIONS: "-Xms512m -Xmx2048m"
 
     steps:
       - name: Checkout
@@ -19,13 +16,14 @@ jobs:
       - name: List repo
         run: ls -lah
 
-      - name: Optional unzip latest zip if no pubspec
+      - name: Optional unzip latest zip if no pubspec.yaml
         id: pickzip
         shell: bash
         run: |
           set -euo pipefail
           if [ -f pubspec.yaml ]; then
-            echo "zipmode=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "zipmode=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
           if [ -z "${SEL}" ]; then
@@ -46,10 +44,11 @@ jobs:
           set -euo pipefail
           DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
           if [ -z "${DIR}" ]; then
-            echo "pubspec.yaml not found"; exit 66
+            echo "pubspec.yaml not found"
+            exit 66
           fi
           echo "project_dir=${DIR}" >> "$GITHUB_OUTPUT"
-          echo "Project: ${DIR}"
+          echo "Project dir: ${DIR}"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -63,7 +62,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Clean caches
+      - name: Clean caches (non-interactive)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
@@ -75,107 +74,24 @@ jobs:
           rm -f pubspec.lock || true
           flutter precache --force
 
-      - name: Rewrite pubspec to any and modern SDK
+      - name: Pub upgrade (keep constraints, but try to最新)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "=== BEFORE ==="; sed -n '1,200p' pubspec.yaml || true
-          cat > _rewrite.py <<'PY'
-import re, pathlib
-
-p = pathlib.Path("pubspec.yaml")
-text = p.read_text(encoding="utf-8")
-lines = text.splitlines()
-
-# Ensure environment sdk >=3.5.0 <4.0.0
-patched = False
-if "environment:" not in text:
-    lines.append("environment:")
-    lines.append("  sdk: '>=3.5.0 <4.0.0'")
-else:
-    out = []
-    i = 0
-    while i < len(lines):
-        out.append(lines[i])
-        if lines[i].strip().startswith("environment:"):
-            i += 1
-            seen = False
-            while i < len(lines) and (lines[i].startswith(" ") or lines[i].strip() == ""):
-                if lines[i].strip().startswith("sdk:"):
-                    out.append("  sdk: '>=3.5.0 <4.0.0'")
-                    seen = True
-                    patched = True
-                    i += 1
-                    while i < len(lines) and lines[i].strip().startswith("#"):
-                        out.append(lines[i]); i += 1
-                    break
-                out.append(lines[i]); i += 1
-            if not seen:
-                out.append("  sdk: '>=3.5.0 <4.0.0'")
-            out.extend(lines[i:])
-            lines = out
-            break
-        i += 1
-if not patched and "environment:" in text and "sdk:" not in "\n".join(lines):
-    lines.append("  sdk: '>=3.5.0 <4.0.0'")
-
-# Set all versions under dependencies/dev_dependencies to 'any'
-out = []
-ctx = None
-for ln in lines:
-    if re.match(r'^\s*dependencies:\s*$', ln):
-        ctx = "dep"; out.append(ln); continue
-    if re.match(r'^\s*dev_dependencies:\s*$', ln):
-        ctx = "dev"; out.append(ln); continue
-    if re.match(r'^\S', ln):
-        ctx = None
-    if ctx in ("dep", "dev"):
-        if re.search(r':\s*[^#]+', ln):
-            ln = re.sub(r':\s*[^#]+', ': any', ln)
-    out.append(ln)
-
-p.write_text("\n".join(out) + "\n", encoding="utf-8")
-PY
-          python3 _rewrite.py
-          echo "=== AFTER ==="; sed -n '1,200p' pubspec.yaml || true
-
-      - name: Pub upgrade
-        working-directory: ${{ steps.detect.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          flutter pub upgrade --major-versions
+          flutter pub upgrade --major-versions || true
           flutter pub get
-          flutter pub deps --style=compact || true
 
-      - name: Patch Android toolchain and V2
+      - name: Patch Android to Embedding V2 (safe edits)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -d android ] || { echo "no android folder"; exit 0; }
+          [ -d android ] || exit 0
 
-          APP="android/app/build.gradle"
-          if [ -f "$APP" ]; then
-            if ! grep -q 'plugins {' "$APP"; then
-              { echo 'plugins {'; echo '  id "com.android.application"'; echo '  id "org.jetbrains.kotlin.android"'; echo '  id "dev.flutter.flutter-gradle-plugin"'; echo '}'; } | cat - "$APP" > "$APP.__tmp__" && mv "$APP.__tmp__" "$APP"
-            else
-              grep -q 'com.android.application' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "com.android.application"/}' "$APP"
-              grep -q 'org.jetbrains.kotlin.android' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "org.jetbrains.kotlin.android"/}' "$APP"
-              grep -q 'dev.flutter.flutter-gradle-plugin' "$APP" || sed -i '0,/plugins\s*{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin"/}' "$APP"
-            fi
-            sed -i -E 's/compileSdk\s*=?\s*[0-9]+/compileSdk 35/g' "$APP" || true
-            sed -i -E 's/compileSdkVersion\s+[0-9]+/compileSdkVersion 35/g' "$APP" || true
-            sed -i -E 's/minSdk\s*=?\s*[0-9]+/minSdk 23/g' "$APP" || true
-            sed -i -E 's/minSdkVersion\s+[0-9]+/minSdkVersion 23/g' "$APP" || true
-            sed -i -E 's/targetSdk\s*=?\s*[0-9]+/targetSdk 35/g' "$APP" || true
-            sed -i -E 's/targetSdkVersion\s+[0-9]+/targetSdkVersion 35/g' "$APP" || true
-          fi
-
-          SETTINGS="android/settings.gradle"
-          if [ -f "$SETTINGS" ]; then
-            if ! grep -q 'dev.flutter.flutter-plugin-loader' "$SETTINGS"; then
+          # settings.gradle: 确保 plugin-loader
+          if [ -f android/settings.gradle ]; then
+            if ! grep -q 'dev.flutter.flutter-plugin-loader' android/settings.gradle; then
               {
                 echo ''
                 echo 'plugins {'
@@ -183,14 +99,26 @@ PY
                 echo '  id("com.android.application") version "8.3.1" apply false'
                 echo '  id("org.jetbrains.kotlin.android") version "1.9.24" apply false'
                 echo '}'
-              } >> "$SETTINGS"
+              } >> android/settings.gradle
             fi
           fi
 
+          # gradle wrapper 升到 8.7
           if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
             sed -i -E 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip#g' android/gradle/wrapper/gradle-wrapper.properties
           fi
 
+          # app/build.gradle: SDK 与插件
+          if [ -f android/app/build.gradle ]; then
+            sed -i -E 's/compileSdk\s*=?\s*[0-9]+/compileSdk 35/g' android/app/build.gradle || true
+            sed -i -E 's/compileSdkVersion\s+[0-9]+/compileSdkVersion 35/g' android/app/build.gradle || true
+            sed -i -E 's/minSdk\s*=?\s*[0-9]+/minSdk 23/g' android/app/build.gradle || true
+            sed -i -E 's/minSdkVersion\s+[0-9]+/minSdkVersion 23/g' android/app/build.gradle || true
+            sed -i -E 's/targetSdk\s*=?\s*[0-9]+/targetSdk 35/g' android/app/build.gradle || true
+            sed -i -E 's/targetSdkVersion\s+[0-9]+/targetSdkVersion 35/g' android/app/build.gradle || true
+          fi
+
+          # Manifest: 去 v1 痕迹 + 加 V2 标记 + 权限
           find android/app/src -type f -name AndroidManifest.xml | while read -r M; do
             sed -i 's/android:name="io\.flutter\.app\.FlutterApplication"//g' "$M" || true
             if ! grep -q 'flutterEmbedding' "$M"; then
@@ -206,6 +134,7 @@ PY
             fi
           done
 
+          # MainActivity: 强制 V2 Activity
           MA_KT="$(find android/app/src -type f -name MainActivity.kt | head -n1 || true)"
           MA_JAVA="$(find android/app/src -type f -name MainActivity.java | head -n1 || true)"
           if [ -n "${MA_KT}" ]; then
@@ -240,9 +169,9 @@ PY
         run: |
           set -euo pipefail
           echo "=== Flutter build log ==="
-          [ -f build_apk.log ] && grep -nE "(^e: |\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:)" build_apk.log || true
+          [ -f build_apk.log ] && grep -nE "(^e: |\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" build_apk.log || true
           echo "=== Gradle build log ==="
-          [ -f gradle_build.log ] && grep -nE "(: error:|\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
+          [ -f gradle_build.log ] && grep -nE "(: error:|\\.kt:[0-9]+:|\\.java:[0-9]+:|^FAILURE:)" gradle_build.log || true
 
       - name: Upload artifacts
         if: always()
