@@ -1,0 +1,107 @@
+name: Android (release build)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: List repo
+        run: ls -lah
+
+      # 强制用最新修复包覆盖到工作区（避免旧 android 工程残留）
+      - name: Unzip final fixed project
+        shell: bash
+        run: |
+          set -euo pipefail
+          SEL="$(ls -1t *FINAL_SYSTEMIC_FIX*.zip 2>/dev/null | head -n1 || true)"
+          if [ -z "${SEL}" ]; then
+            # 也支持你的 zip 命名不同，只要是最新 zip
+            SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
+          fi
+          [ -n "${SEL}" ] || { echo "❌ 未找到 zip"; exit 66; }
+          echo "Using zip: ${SEL}"
+          # -o 覆盖现有文件；排除工作流目录，避免自毁
+          unzip -q -o "${SEL}" -x ".github/*"
+
+      - name: Detect Flutter project dir
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="$(find . -maxdepth 3 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
+          [ -n "$DIR" ] || { echo "❌ 未找到 pubspec.yaml"; exit 66; }
+          DIR="${DIR#./}"
+          echo "project_dir=${DIR}" >> "$GITHUB_OUTPUT"
+          echo "Project dir: $DIR"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter 3.35.3 (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.35.3"
+          channel: stable
+          cache: true
+
+      - name: Print tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter doctor -v || true
+          flutter --version || true
+          dart --version || true
+
+      - name: Clean caches (fresh resolve)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter clean || true
+          rm -f pubspec.lock || true
+          yes | flutter pub cache clean >/dev/null 2>&1 || true
+          rm -rf "$HOME/.pub-cache" || true
+
+      - name: Flutter pub get
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: flutter pub get
+
+      # 可选：验证 :app 没有重复应用 flutter 插件（防止“已存在同名扩展”）
+      - name: Sanity check (:app no duplicate plugin apply)
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=android/app/build.gradle
+          ! grep -nE 'dev\.flutter\.flutter-gradle-plugin' "$APP"
+          ! grep -nE 'apply[[:space:]]+(from|plugin):.*flutter' "$APP" || { echo "❌ app 中仍有手动应用 flutter 插件"; exit 65; }
+          grep -nE '^\s*flutter\s*\{' "$APP" || { echo "❌ app 缺少 flutter { source '../..' }"; exit 65; }
+
+      - name: Build APK (Flutter release)
+        id: build
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ( set -o pipefail; flutter build apk --release -v 2>&1 | tee build_apk.log )
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-and-logs
+          path: |
+            ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+            ${{ steps.detect.outputs.project_dir }}/build_apk.log
