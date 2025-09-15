@@ -15,26 +15,16 @@ jobs:
       - name: List repo
         run: ls -lah
 
-      - name: Unzip latest zip if no pubspec.yaml
-        id: unzip
+      - name: Force replace with latest zip
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -f pubspec.yaml ]; then
-            echo "unzipped=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
-          if [ -z "$SEL" ]; then
-            SEL="$(find . -maxdepth 6 -type f -name '*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
-          fi
-          if [ -n "$SEL" ]; then
-            unzip -q -n "$SEL" -d .
-            echo "unzipped=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No pubspec.yaml and no zip"
-            exit 66
-          fi
+         set -euo pipefail
+         # 选最新的源码包（按需改成你的文件名模式）
+         SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
+         [ -n "$SEL" ] || { echo "No zip found"; exit 66; }
+         echo "Using ZIP: $SEL"
+         # 强制覆盖解压，但排除工作流目录，避免自我覆盖
+         unzip -q -o "$SEL" -x ".github/*"
 
       - name: Detect Flutter project dir (find pubspec.yaml)
         id: detect
