@@ -223,6 +223,47 @@ jobs:
             -E 'io\.flutter\.app\.(FlutterActivity|FragmentActivity|FlutterApplication)|io\.flutter\.view\.FlutterMain|GeneratedPluginRegistrant\.registerWith|PluginRegistry(\.Registrar)?|ShimPluginRegistry|PluginRegistrantCallback' \
             "$PUB" 2>/dev/null || true
 
+      - name: Sanity fix app/build.gradle (dedupe Flutter plugin)
+        shell: bash
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          echo "=== BEFORE (head) ==="
+          nl -ba android/app/build.gradle | sed -n '1,120p' || true
+          echo "=== BEFORE (grep) ==="
+          grep -nE 'flutter\.gradle|dev\.flutter\.flutter-gradle-plugin' android/app/build.gradle || true
+
+          APP=android/app/build.gradle
+
+          # 1) 移除所有旧式 apply from: '.../flutter.gradle'
+          perl -0777 -pe "s/^[ \\t]*apply[ \\t]+from:[ \\t]*['\\\"][^'\\\"]*flutter\\.gradle['\\\"][ \\t]*\\r?\\n//mg" -i "$APP"
+          # 带变量的写法（如 $flutterRoot / ${flutterSdkPath}）也干掉
+          perl -0777 -pe "s/^[ \\t]*apply[ \\t]+from:[ \\t]*\\$?\\{?flutter[^\\n\\}]*\\}?[^\\n]*flutter\\.gradle[ \\t]*\\r?\\n//mg" -i "$APP"
+
+          # 2) 移除旧式 apply plugin: 'dev.flutter.flutter-gradle-plugin'
+          perl -0777 -pe "s/^[ \\t]*apply[ \\t]+plugin:[ \\t]*['\\\"]dev\\.flutter\\.flutter-gradle-plugin['\\\"][ \\t]*\\r?\\n//mg" -i "$APP"
+
+          # 3) plugins{} 中确保 flutter 插件只出现一次（去重）
+          awk '
+            BEGIN{in=0; seen=0}
+            /^[[:space:]]*plugins[[:space:]]*\\{/ {in=1}
+            { 
+              if (in && $0 ~ /id[[:space:]]+\"dev\\.flutter\\.flutter-gradle-plugin\"/) {
+                if (seen==1) next; else seen=1
+              }
+              print
+              if (in && $0 ~ /\\}/) in=0
+            }
+          ' "$APP" > "$APP.tmp" && mv "$APP.tmp" "$APP"
+
+          echo "=== AFTER (head) ==="
+          nl -ba android/app/build.gradle | sed -n '1,120p' || true
+          echo "=== AFTER (grep) ==="
+          grep -nE 'flutter\.gradle|dev\.flutter\.flutter-gradle-plugin' android/app/build.gradle || true
+
+          echo "=== FULL REPO SEARCH (should be empty for apply-from/apply-plugin) ==="
+          grep -RIn --include=*.gradle -E 'apply[[:space:]]+from:.*flutter\.gradle|apply[[:space:]]+plugin:.*dev\.flutter\.flutter-gradle-plugin' android || true
       - name: Build APK (capture logs)
         id: buildapk
         working-directory: ${{ steps.detect.outputs.project_dir }}
