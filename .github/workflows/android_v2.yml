@@ -59,15 +59,22 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Print tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter doctor -v || true
+          flutter --version || true
+          dart --version || true
+
       - name: Clean ALL pub caches (fresh resolve)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          # 本地项目清理
           flutter clean || true
           rm -f pubspec.lock || true
-          # 全局 pub 缓存强制无交互清理（双保险：命令和目录都清）
+          # 无需确认，强制清空缓存
           yes | flutter pub cache clean >/dev/null 2>&1 || true
           rm -rf "$HOME/.pub-cache" || true
 
@@ -75,6 +82,73 @@ jobs:
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: flutter pub get
+
+      - name: Patch Android toolchain to latest (Gradle/AGP/Kotlin)
+        shell: bash
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          mkdir -p android/gradle/wrapper
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-all.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+          cat > android/build.gradle <<'EOF'
+          plugins {
+              id "com.android.application" version "8.7.2" apply false
+              id "com.android.library"    version "8.7.2" apply false
+              id "org.jetbrains.kotlin.android" version "2.0.21" apply false
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
+          EOF
+
+          # 如果项目已有 namespace/applicationId，请不要覆盖；这里只在缺省时写入示例
+          if [ ! -f android/app/build.gradle ]; then
+            cat > android/app/build.gradle <<'EOF'
+            plugins {
+                id "com.android.application"
+                id "org.jetbrains.kotlin.android"
+            }
+            android {
+                namespace "com.example.app"
+                compileSdkVersion 35
+                defaultConfig {
+                    applicationId "com.example.app"
+                    minSdkVersion 21
+                    targetSdkVersion 35
+                    versionCode 1
+                    versionName "1.0"
+                }
+                buildTypes {
+                    release {
+                        minifyEnabled false
+                        proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                    }
+                }
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_17
+                    targetCompatibility JavaVersion.VERSION_17
+                }
+                kotlinOptions { jvmTarget = "17" }
+            }
+            dependencies { }
+            EOF
+          fi
+
+          cat > android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          kotlin.code.style=official
+          EOF
+
+          (cd android && ./gradlew --version || true)
 
       - name: Scan project/android for V1 markers (with line numbers)
         working-directory: ${{ steps.detect.outputs.project_dir }}
@@ -98,24 +172,18 @@ jobs:
             -E 'io\.flutter\.app\.(FlutterActivity|FragmentActivity|FlutterApplication)|io\.flutter\.view\.FlutterMain|GeneratedPluginRegistrant\.registerWith|PluginRegistry(\.Registrar)?|ShimPluginRegistry|PluginRegistrantCallback' \
             "$PUB" 2>/dev/null || true
 
-      - name: Build APK (capture logs)
+      - name: Build APK (full verbose and do not stop on fail)
         id: buildapk
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
-          ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log )
+          ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log ) || true
+          echo "EXIT_CODE=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          echo "=== tail build_apk.log ==="
+          tail -n 400 build_apk.log || true
 
-      - name: Annotate compiler errors
-        if: always()
-        working-directory: ${{ steps.detect.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== Flutter build log (errors only) ==="
-          [ -f build_apk.log ] && grep -nE "(^e: |\.kt:[0-9]+:|\.java:[0-9]+:|^FAILURE:|Android v1 embedding)" build_apk.log || true
-
-      - name: Upload artifacts (APK + logs)
+      - name: Upload artifacts (APK + logs + Gradle files)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -123,3 +191,10 @@ jobs:
           path: |
             ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
             ${{ steps.detect.outputs.project_dir }}/build_apk.log
+            ${{ steps.detect.outputs.project_dir }}/android/gradle/wrapper/gradle-wrapper.properties
+            ${{ steps.detect.outputs.project_dir }}/android/build.gradle
+            ${{ steps.detect.outputs.project_dir }}/android/app/build.gradle
+            ${{ steps.detect.outputs.project_dir }}/android/gradle.properties
+            ${{ steps.detect.outputs.project_dir }}/android/.gradle/**/*
+          if-no-files-found: warn
+```0
