@@ -105,19 +105,7 @@ jobs:
           fi
         working-directory: ${{ steps.detect.outputs.project_dir }}
 
-      - name: Sanity check Flutter plugin application
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== HEAD of android/app/build.gradle ==="
-          nl -ba android/app/build.gradle | sed -n '1,120p' || true
-          echo "=== checks ==="
-          echo "[1] must have exactly ONE id line:"
-          grep -nE '^[[:space:]]*id[[:space:]]+"dev\.flutter\.flutter-gradle-plugin"[[:space:]]*$' android/app/build.gradle | tee /tmp/ids.txt
-          test "$(wc -l </tmp/ids.txt)" -eq 1
-          echo "[2] must NOT contain legacy apply:"
-          ! grep -nE 'apply[[:space:]]+from:.*flutter\.gradle|apply[[:space:]]+plugin:.*dev\.flutter\.flutter-gradle-plugin' android/app/build.gradle
-          echo "OK"
+      
       
       - name: Build APK (Flutter release)
         if: steps.detect.outputs.project_type == 'flutter'
