@@ -21,17 +21,21 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f pubspec.yaml ]; then
-            echo "unzipped=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "unzipped=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           SEL="$(ls -1t *.zip 2>/dev/null | head -n1 || true)"
-          if [ -z "${SEL}" ]; then
+          if [ -z "$SEL" ]; then
             SEL="$(find . -maxdepth 6 -type f -name '*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
           fi
-          if [ -n "${SEL}" ]; then
-            unzip -q "${SEL}" -d .
+          if [ -n "$SEL" ]; then
+            # -n: never overwrite existing files (avoid interactive prompt)
+            # 如需更保险，还可排除工作流文件：在下一行末尾加  -x ".github/*"
+            unzip -q -n "$SEL" -d .
             echo "unzipped=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No pubspec.yaml and no zip"; exit 66
+            echo "No pubspec.yaml and no zip"
+            exit 66
           fi
 
       - name: Detect Flutter project dir (find pubspec.yaml)
