@@ -5,7 +5,7 @@ on:
   push:
     paths:
       - "quote_app3333.zip"
-      - "quote6.zip"
+      - "quote_app_v2_alllatest_20250915_ALL_PROJECTS_FLUTTER_PLUGIN.zip"
 
 jobs:
   build:
@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           set -e
-          if [[ -f "quote6.zip" ]]; then
-            zip="quote6.zip"
+          if [[ -f "quote_app_v2_alllatest_20250915_ALL_PROJECTS_FLUTTER_PLUGIN.zip" ]]; then
+            zip="quote_app_v2_alllatest_20250915_ALL_PROJECTS_FLUTTER_PLUGIN.zip"
           elif [[ -f "quote_app333.zip" ]]; then
             zip="quote_app333.zip"
           else
