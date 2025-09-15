@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
           mkdir -p android/gradle/wrapper
 
-          # gradle-wrapper.properties -> Gradle 8.9
+          # Gradle 8.9
           {
             printf '%s\n' 'distributionBase=GRADLE_USER_HOME'
             printf '%s\n' 'distributionPath=wrapper/dists'
@@ -101,40 +101,37 @@ jobs:
             printf '%s\n' 'zipStorePath=wrapper/dists'
           } > android/gradle/wrapper/gradle-wrapper.properties
 
-          # top-level android/build.gradle -> AGP 8.7.2, Kotlin 2.0.21
+          # 顶层 build.gradle: 不指定版本，使用已有 classpath 的 AGP/Kotlin
           {
             printf '%s\n' 'plugins {'
-            printf '%s\n' '    id "com.android.application" version "8.7.2" apply false'
-            printf '%s\n' '    id "com.android.library"    version "8.7.2" apply false'
-            printf '%s\n' '    id "org.jetbrains.kotlin.android" version "2.0.21" apply false'
+            printf '%s\n' '    id "com.android.application" apply false'
+            printf '%s\n' '    id "com.android.library"    apply false'
+            printf '%s\n' '    id "org.jetbrains.kotlin.android" apply false'
             printf '%s\n' '}'
             printf '%s\n' 'allprojects { repositories { google(); mavenCentral() } }'
           } > android/build.gradle
 
-          # app/build.gradle: lift compile/target/jvmTarget (keep existing namespace/applicationId)
+          # app/build.gradle 提升编译/目标与 JDK 兼容，保留原 namespace/applicationId
           if [ -f android/app/build.gradle ]; then
             sed -i -E 's/compileSdk(VERSION)?[[:space:]]+[0-9]+/compileSdkVersion 35/g' android/app/build.gradle || true
             sed -i -E 's/targetSdk(VERSION)?[[:space:]]+[0-9]+/targetSdkVersion 35/g' android/app/build.gradle || true
             if ! grep -q 'minSdk' android/app/build.gradle; then
-              sed -i -E 's/(defaultConfig[[:space:]]*\{)/\1\
-           minSdkVersion 21/' android/app/build.gradle || true
+              sed -i -E 's/(defaultConfig[[:space:]]*\{)/\1\n        minSdkVersion 21/' android/app/build.gradle || true
             fi
             if ! grep -q 'kotlinOptions' android/app/build.gradle; then
-              sed -i -E 's/(android[[:space:]]*\{)/\1\
-           kotlinOptions { jvmTarget = "17" }/' android/app/build.gradle || true
+              sed -i -E 's/(android[[:space:]]*\{)/\1\n    kotlinOptions { jvmTarget = "17" }/' android/app/build.gradle || true
             else
               sed -i -E 's/jvmTarget[[:space:]]*=.*/jvmTarget = "17"/' android/app/build.gradle || true
             fi
             if ! grep -q 'compileOptions' android/app/build.gradle; then
-              sed -i -E 's/(android[[:space:]]*\{)/\1\
-          compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }/' android/app/build.gradle || true
+              sed -i -E 's/(android[[:space:]]*\{)/\1\n    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }/' android/app/build.gradle || true
             else
               sed -i -E 's/sourceCompatibility[[:space:]]+JavaVersion\.[A-Z0-9_]+/sourceCompatibility JavaVersion.VERSION_17/' android/app/build.gradle || true
               sed -i -E 's/targetCompatibility[[:space:]]+JavaVersion\.[A-Z0-9_]+/targetCompatibility JavaVersion.VERSION_17/' android/app/build.gradle || true
             fi
           fi
 
-          # gradle.properties base flags
+          # gradle.properties
           {
             printf '%s\n' 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8'
             printf '%s\n' 'android.useAndroidX=true'
@@ -143,7 +140,6 @@ jobs:
           } > android/gradle.properties
 
           (cd android && ./gradlew --version || true)
-
       - name: Scan project/android for V1 markers (with line numbers)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
