@@ -3,12 +3,11 @@ name: Android (scan V1 and build)
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
   android:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,7 +31,7 @@ jobs:
             unzip -q "${SEL}" -d .
             echo "unzipped=true" >> "$GITHUB_OUTPUT"
           else
-            echo "❌ 没有 pubspec.yaml，也没有 zip"; exit 66
+            echo "No pubspec.yaml and no zip"; exit 66
           fi
 
       - name: Detect Flutter project dir (find pubspec.yaml)
@@ -41,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           DIR="$(find . -maxdepth 6 -type f -name pubspec.yaml | head -n1 | xargs -I{} dirname {} || true)"
-          [ -n "$DIR" ] || { echo "❌ 未找到 pubspec.yaml"; exit 66; }
+          [ -n "$DIR" ] || { echo "No pubspec.yaml"; exit 66; }
           DIR="${DIR#./}"
           echo "project_dir=${DIR}" >> "$GITHUB_OUTPUT"
           echo "Project: $DIR"
@@ -50,12 +49,12 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Setup Flutter 3.35.3 (stable)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.35.3'
+          flutter-version: "3.35.3"
           channel: stable
           cache: true
 
@@ -72,10 +71,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 本地项目清理
           flutter clean || true
           rm -f pubspec.lock || true
-          # 全局 pub 缓存强制无交互清理（双保险：命令和目录都清）
           yes | flutter pub cache clean >/dev/null 2>&1 || true
           rm -rf "$HOME/.pub-cache" || true
 
@@ -84,7 +81,6 @@ jobs:
         shell: bash
         run: flutter pub get
 
-      # === 新增：安全写法，修复 heredoc 导致的 EOF 报错，并对齐最新插件需求的构建链 ===
       - name: Patch Android toolchain to latest (Gradle/AGP/Kotlin)
         shell: bash
         working-directory: ${{ steps.detect.outputs.project_dir }}
@@ -93,53 +89,55 @@ jobs:
           mkdir -p android/gradle/wrapper
 
           # gradle-wrapper.properties -> Gradle 8.9
-          printf '%s\n' \
-            'distributionBase=GRADLE_USER_HOME' \
-            'distributionPath=wrapper/dists' \
-            'distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-all.zip' \
-            'zipStoreBase=GRADLE_USER_HOME' \
-            'zipStorePath=wrapper/dists' \
-            > android/gradle/wrapper/gradle-wrapper.properties
+          {
+            printf '%s\n' 'distributionBase=GRADLE_USER_HOME'
+            printf '%s\n' 'distributionPath=wrapper/dists'
+            printf '%s\n' 'distributionUrl=https://services.gradle.org/distributions/gradle-8.9-all.zip'
+            printf '%s\n' 'zipStoreBase=GRADLE_USER_HOME'
+            printf '%s\n' 'zipStorePath=wrapper/dists'
+          } > android/gradle/wrapper/gradle-wrapper.properties
 
-          # 顶层 android/build.gradle -> AGP 8.7.2, Kotlin 2.0.21
-          cat > android/build.gradle <<'P_EOF'
-plugins {
-    id "com.android.application" version "8.7.2" apply false
-    id "com.android.library"    version "8.7.2" apply false
-    id "org.jetbrains.kotlin.android" version "2.0.21" apply false
-}
-allprojects { repositories { google(); mavenCentral() } }
-P_EOF
+          # top-level android/build.gradle -> AGP 8.7.2, Kotlin 2.0.21
+          {
+            printf '%s\n' 'plugins {'
+            printf '%s\n' '    id "com.android.application" version "8.7.2" apply false'
+            printf '%s\n' '    id "com.android.library"    version "8.7.2" apply false'
+            printf '%s\n' '    id "org.jetbrains.kotlin.android" version "2.0.21" apply false'
+            printf '%s\n' '}'
+            printf '%s\n' 'allprojects { repositories { google(); mavenCentral() } }'
+          } > android/build.gradle
 
-          # app/build.gradle：兜底把 compile/target/jvmTarget 提到建议值（保留你的 namespace/applicationId）
+          # app/build.gradle: lift compile/target/jvmTarget (keep existing namespace/applicationId)
           if [ -f android/app/build.gradle ]; then
             sed -i -E 's/compileSdk(VERSION)?[[:space:]]+[0-9]+/compileSdkVersion 35/g' android/app/build.gradle || true
             sed -i -E 's/targetSdk(VERSION)?[[:space:]]+[0-9]+/targetSdkVersion 35/g' android/app/build.gradle || true
             if ! grep -q 'minSdk' android/app/build.gradle; then
-              sed -i -E 's/(defaultConfig[[:space:]]*\{)/\1\n        minSdkVersion 21/' android/app/build.gradle || true
+              sed -i -E 's/(defaultConfig[[:space:]]*\{)/\1\
+           minSdkVersion 21/' android/app/build.gradle || true
             fi
             if ! grep -q 'kotlinOptions' android/app/build.gradle; then
-              sed -i -E 's/(android[[:space:]]*\{)/\1\n    kotlinOptions { jvmTarget = "17" }/' android/app/build.gradle || true
+              sed -i -E 's/(android[[:space:]]*\{)/\1\
+           kotlinOptions { jvmTarget = "17" }/' android/app/build.gradle || true
             else
               sed -i -E 's/jvmTarget[[:space:]]*=.*/jvmTarget = "17"/' android/app/build.gradle || true
             fi
             if ! grep -q 'compileOptions' android/app/build.gradle; then
-              sed -i -E 's/(android[[:space:]]*\{)/\1\n    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }/' android/app/build.gradle || true
+              sed -i -E 's/(android[[:space:]]*\{)/\1\
+          compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }/' android/app/build.gradle || true
             else
               sed -i -E 's/sourceCompatibility[[:space:]]+JavaVersion\.[A-Z0-9_]+/sourceCompatibility JavaVersion.VERSION_17/' android/app/build.gradle || true
               sed -i -E 's/targetCompatibility[[:space:]]+JavaVersion\.[A-Z0-9_]+/targetCompatibility JavaVersion.VERSION_17/' android/app/build.gradle || true
             fi
           fi
 
-          # gradle.properties 基础参数
-          printf '%s\n' \
-            'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8' \
-            'android.useAndroidX=true' \
-            'android.enableJetifier=true' \
-            'kotlin.code.style=official' \
-            > android/gradle.properties
+          # gradle.properties base flags
+          {
+            printf '%s\n' 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8'
+            printf '%s\n' 'android.useAndroidX=true'
+            printf '%s\n' 'android.enableJetifier=true'
+            printf '%s\n' 'kotlin.code.style=official'
+          } > android/gradle.properties
 
-          # 打印版本方便排查
           (cd android && ./gradlew --version || true)
 
       - name: Scan project/android for V1 markers (with line numbers)
@@ -170,7 +168,6 @@ P_EOF
         shell: bash
         run: |
           set -euo pipefail
-          # 失败也不中断，保证日志可上传
           ( set -o pipefail; flutter build apk -v 2>&1 | tee build_apk.log ) || true
           echo "=== tail build_apk.log ==="
           tail -n 400 build_apk.log || true
