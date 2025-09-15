@@ -104,7 +104,7 @@ jobs:
 
           # ---------- root build.gradle: inject-only (never overwrite) ----------
           touch "$ROOT"
-          if ! grep -qE '^[[:space:]]*plugins[[:space:]]*\\{' "$ROOT"; then
+          if ! grep -qE '^[[:space:]]*plugins[[:space:]]*\{' "$ROOT"; then
             {
               printf '%s\n' 'plugins {'
               printf '%s\n' '  id "com.android.application" apply false'
@@ -115,7 +115,7 @@ jobs:
           fi
 
           grep -q 'dev.flutter.flutter-gradle-plugin' "$ROOT" || \
-            sed -i -E '0,/plugins[[:space:]]*\\{/{s//plugins {\\n  id "dev.flutter.flutter-gradle-plugin" apply false/}' "$ROOT"
+            sed -i -E '0,/plugins[[:space:]]*\{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin" apply false/}' "$ROOT"
 
           grep -q 'allprojects' "$ROOT" || \
             printf '%s\n' 'allprojects { repositories { google(); mavenCentral() } }' >> "$ROOT"
@@ -128,7 +128,7 @@ jobs:
               printf '%s\n' '  proj.plugins.whenPluginAdded { pl ->'
               printf '%s\n' '    def n = pl.class.name'
               printf '%s\n' "    if (n.contains('AppPlugin') || n.contains('LibraryPlugin')) {"
-              printf '%s\n' "      if (proj.name != \"app\" && !proj.plugins.hasPlugin('dev.flutter.flutter-gradle-plugin')) {"
+              printf '%s\n' "      if (proj.path != \":app\" && !proj.plugins.hasPlugin('dev.flutter.flutter-gradle-plugin')) {"
               printf '%s\n' "        proj.apply plugin: 'dev.flutter.flutter-gradle-plugin'"
               printf '%s\n' '      }'
               printf '%s\n' "      def androidExt = proj.extensions.findByName('android')"
@@ -147,40 +147,41 @@ jobs:
 
           # ---------- app/build.gradle: ensure plugin + 17/35 baseline ----------
           if [ -f "$APP" ]; then
-            if ! grep -qE '^[[:space:]]*plugins[[:space:]]*\\{' "$APP"; then
+            if ! grep -qE '^[[:space:]]*plugins[[:space:]]*\{' "$APP"; then
               sed -i '1i plugins {\n  id "com.android.application"\n  id "org.jetbrains.kotlin.android"\n}\n' "$APP"
               sed -i '/apply plugin:[[:space:]]*["'\'']com.android.application["'\'']/d' "$APP" || true
               sed -i '/apply plugin:[[:space:]]*["'\'']kotlin-android["'\'']/d' "$APP" || true
             fi
             grep -q 'dev.flutter.flutter-gradle-plugin' "$APP" || \
-              sed -i -E '0,/plugins[[:space:]]*\\{/{s//plugins {\\n  id "dev.flutter.flutter-gradle-plugin"/}' "$APP"
+              sed -i -E '0,/plugins[[:space:]]*\{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin"/}' "$APP"
 
             sed -i -E 's/compileSdk(VERSION)?[[:space:]]+[0-9]+/compileSdkVersion 35/g' "$APP" || true
             sed -i -E 's/targetSdk(VERSION)?[[:space:]]+[0-9]+/targetSdkVersion 35/g' "$APP" || true
-            grep -q 'minSdk' "$APP" || sed -i -E 's/(defaultConfig[[:space:]]*\\{)/\\1\n    minSdkVersion 21/' "$APP" || true
+            grep -q 'minSdk' "$APP" || sed -i -E 's/(defaultConfig[[:space:]]*\{)/\1\n    minSdkVersion 21/' "$APP" || true
 
             if grep -q 'kotlinOptions' "$APP"; then
               sed -i -E 's/jvmTarget[[:space:]]*=.*/jvmTarget = "17"/' "$APP"
             else
-              sed -i -E '0,/android[[:space:]]*\\{/{s//android {\\n  kotlinOptions { jvmTarget = "17" }/}' "$APP"
+              sed -i -E '0,/android[[:space:]]*\{/{s//android {\n  kotlinOptions { jvmTarget = "17" }/}' "$APP"
             fi
             if grep -q 'compileOptions' "$APP"; then
-              sed -i -E 's/sourceCompatibility[[:space:]]+JavaVersion\\.[A-Z0-9_]+/sourceCompatibility JavaVersion.VERSION_17/' "$APP"
-              sed -i -E 's/targetCompatibility[[:space:]]+JavaVersion\\.[A-Z0-9_]+/targetCompatibility JavaVersion.VERSION_17/' "$APP"
+              sed -i -E 's/sourceCompatibility[[:space:]]+JavaVersion\.[A-Z0-9_]+/sourceCompatibility JavaVersion.VERSION_17/' "$APP"
+              sed -i -E 's/targetCompatibility[[:space:]]+JavaVersion\.[A-Z0-9_]+/targetCompatibility JavaVersion.VERSION_17/' "$APP"
             else
-              sed -i -E '0,/android[[:space:]]*\\{/{s//android {\\n  compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }/}' "$APP"
+              sed -i -E '0,/android[[:space:]]*\{/{s//android {\n  compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }/}' "$APP"
             fi
 
-            # remove legacy flutter.gradle apply to avoid duplicate 'flutter' extension
+            # remove legacy flutter.gradle and legacy apply plugin lines
             sed -i -E '/apply[[:space:]]+from:[[:space:]]*".*flutter_tools\/gradle\/flutter\.gradle"/d' "$APP" || true
             sed -i -E "/apply[[:space:]]+from:[[:space:]]*'.*flutter_tools\/gradle\/flutter\.gradle'/d" "$APP" || true
+            sed -i -E "/apply[[:space:]]+plugin:[[:space:]]*['\"]dev\.flutter\.flutter-gradle-plugin['\"]/d" "$APP" || true
           fi
 
           # ---------- settings.gradle: ensure Flutter plugin loader ----------
           if [ -f "$SET" ]; then
             if ! grep -q 'dev.flutter.flutter-plugin-loader' "$SET"; then
               awk 'BEGIN{pm=0}
-                   /pluginManagement[[:space:]]*\\{/ {pm=1}
+                   /pluginManagement[[:space:]]*\{/ {pm=1}
                    {print}
                    END{
                      if(!pm){
@@ -199,7 +200,7 @@ jobs:
             fi
           fi
 
-          (cd android && ./gradlew --version || true)
+          (cd android && ./gradlew --version || true)           
       - name: Scan project/android for V1 markers (with line numbers)
         working-directory: ${{ steps.detect.outputs.project_dir }}
         shell: bash
