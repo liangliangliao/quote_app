@@ -90,7 +90,6 @@ jobs:
           set -euo pipefail
           mkdir -p android/gradle/wrapper
 
-          # Gradle 8.9
           {
             printf '%s\n' 'distributionBase=GRADLE_USER_HOME'
             printf '%s\n' 'distributionPath=wrapper/dists'
@@ -103,10 +102,8 @@ jobs:
           APP=android/app/build.gradle
           SET=android/settings.gradle
 
-          # ---------- root build.gradle: inject-only (never overwrite) ----------
+          # root build.gradle: inject-only
           touch "$ROOT"
-
-          # ensure plugins block exists
           if ! grep -qE '^[[:space:]]*plugins[[:space:]]*\{' "$ROOT"; then
             {
               printf '%s\n' 'plugins {'
@@ -117,15 +114,12 @@ jobs:
             } >> "$ROOT"
           fi
 
-          # add flutter-gradle-plugin placeholder (apply false) if missing
           grep -q 'dev.flutter.flutter-gradle-plugin' "$ROOT" || \
             sed -i -E '0,/plugins[[:space:]]*\{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin" apply false/}' "$ROOT"
 
-          # ensure repositories
           grep -q 'allprojects' "$ROOT" || \
             printf '%s\n' 'allprojects { repositories { google(); mavenCentral() } }' >> "$ROOT"
 
-          # auto-apply flutter plugin for all Android subprojects + default compileSdk
           MARK='// AUTO: apply Flutter Gradle plugin to all Android subprojects'
           if ! grep -qF "$MARK" "$ROOT"; then
             {
@@ -151,24 +145,20 @@ jobs:
             } >> "$ROOT"
           fi
 
-          # ---------- app/build.gradle: ensure plugin + 17/35 baseline ----------
+          # app/build.gradle: ensure plugin and baseline
           if [ -f "$APP" ]; then
-            # migrate old 'apply plugin:' to plugins block if needed
             if ! grep -qE '^[[:space:]]*plugins[[:space:]]*\{' "$APP"; then
               sed -i '1i plugins {\n  id "com.android.application"\n  id "org.jetbrains.kotlin.android"\n}\n' "$APP"
               sed -i '/apply plugin:[[:space:]]*["'\'']com.android.application["'\'']/d' "$APP" || true
               sed -i '/apply plugin:[[:space:]]*["'\'']kotlin-android["'\'']/d' "$APP" || true
             fi
-            # apply flutter plugin if missing
             grep -q 'dev.flutter.flutter-gradle-plugin' "$APP" || \
               sed -i -E '0,/plugins[[:space:]]*\{/{s//plugins {\n  id "dev.flutter.flutter-gradle-plugin"/}' "$APP"
 
-            # baseline versions
             sed -i -E 's/compileSdk(VERSION)?[[:space:]]+[0-9]+/compileSdkVersion 35/g' "$APP" || true
             sed -i -E 's/targetSdk(VERSION)?[[:space:]]+[0-9]+/targetSdkVersion 35/g' "$APP" || true
             grep -q 'minSdk' "$APP" || sed -i -E 's/(defaultConfig[[:space:]]*\{)/\1\n    minSdkVersion 21/' "$APP" || true
 
-            # java/kotlin 17
             if grep -q 'kotlinOptions' "$APP"; then
               sed -i -E 's/jvmTarget[[:space:]]*=.*/jvmTarget = "17"/' "$APP"
             else
@@ -182,7 +172,7 @@ jobs:
             fi
           fi
 
-          # ---------- settings.gradle: ensure Flutter plugin loader ----------
+          # settings.gradle: ensure Flutter plugin loader
           if [ -f "$SET" ]; then
             if ! grep -q 'dev.flutter.flutter-plugin-loader' "$SET"; then
               awk 'BEGIN{pm=0}
@@ -256,4 +246,3 @@ jobs:
           path: |
             ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
             ${{ steps.detect.outputs.project_dir }}/build_apk.log
-```0
