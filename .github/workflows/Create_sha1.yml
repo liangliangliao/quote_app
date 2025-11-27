@@ -75,7 +75,7 @@ jobs:
             fi
 
              if [[ -n "$FLUTTER_DIR" ]]; then
-             echo "project_type=flutter" >> $GITHUB_OUTPUT
+             echo "project_type=flutter" >> $GITHUBOUTPUT
              echo "project_dir=$FLUTTER_DIR" >> $GITHUB_OUTPUT
              echo "Detected Flutter project: $FLUTTER_DIR"
               ls -la "$FLUTTER_DIR"
@@ -128,7 +128,13 @@ jobs:
          test -f pubspec.yaml
          test -f lib/main.dart
 
-      # ==== 新增：Flutter 工程下输出 SHA1（signingReport） ====
+      # 关键修改：先给 android/gradlew 加执行权限
+      - name: Make Gradle wrapper executable (Flutter)
+        if: steps.detect.outputs.project_type == 'flutter'
+        working-directory: ${{ steps.detect.outputs.project_dir }}/android
+        run: chmod +x ./gradlew
+
+      # ==== Flutter 工程下输出 SHA1（signingReport） ====
       - name: Show Android signing report (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
@@ -153,7 +159,7 @@ jobs:
         with:
           gradle-version: 8.7
 
-      # ==== 新增：Gradle 工程下输出 SHA1（signingReport） ====
+      # ==== Gradle 工程下输出 SHA1（signingReport） ====
       - name: Show Android signing report (Gradle)
         if: steps.detect.outputs.project_type == 'gradle'
         working-directory: ${{ steps.detect.outputs.project_dir }}
