@@ -56,39 +56,42 @@ jobs:
         id: detect
         shell: bash
         run: |
-
           set -e
           # Prefer a Flutter *app* root: must have both pubspec.yaml and lib/main.dart
           FLUTTER_DIR=""
           while IFS= read -r d; do
-           if [[ -f "$d/lib/main.dart" ]]; then FLUTTER_DIR="$d"; break; fi
-           done < <(find . -maxdepth 3 -type f -name pubspec.yaml -printf '%h\n' | sort -u)
+            if [[ -f "$d/lib/main.dart" ]]; then
+              FLUTTER_DIR="$d"
+              break
+            fi
+          done < <(find . -maxdepth 3 -type f -name pubspec.yaml -printf '%h\n' | sort -u)
 
           GRADLE_DIR=""
           if [[ -z "$FLUTTER_DIR" ]]; then
-          # fallback: first pubspec.yaml (sorted) if no app-style root found
-           FLUTTER_DIR="$(find . -maxdepth 3 -type f -name pubspec.yaml -printf '%h\n' | sort -u | head -n 1 || true)"
-           fi
-           if [[ -z "$FLUTTER_DIR" ]]; then
-          # find Android Gradle settings as last resort
-           GRADLE_DIR="$(find . -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -printf '%h\n' | sort -u | head -n 1 || true)"
-            fi
+            # fallback: first pubspec.yaml (sorted) if no app-style root found
+            FLUTTER_DIR="$(find . -maxdepth 3 -type f -name pubspec.yaml -printf '%h\n' | sort -u | head -n 1 || true)"
+          fi
+          if [[ -z "$FLUTTER_DIR" ]]; then
+            # find Android Gradle settings as last resort
+            GRADLE_DIR="$(find . -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -printf '%h\n' | sort -u | head -n 1 || true)"
+          fi
 
-             if [[ -n "$FLUTTER_DIR" ]]; then
-             echo "project_type=flutter" >> $GITHUBOUTPUT
-             echo "project_dir=$FLUTTER_DIR" >> $GITHUB_OUTPUT
-             echo "Detected Flutter project: $FLUTTER_DIR"
-              ls -la "$FLUTTER_DIR"
-             test -f "$FLUTTER_DIR/pubspec.yaml"
-             test -f "$FLUTTER_DIR/lib/main.dart"
-             elif [[ -n "$GRADLE_DIR" ]]; then
-             echo "project_type=gradle" >> $GITHUB_OUTPUT
-             echo "project_dir=$GRADLE_DIR" >> $GITHUB_OUTPUT
-             echo "Detected Android Gradle project: $GRADLE_DIR"
-             ls -la "$GRADLE_DIR"
-             else
-              echo "❌ 未检测到 Flutter 或 Android Gradle 工程（缺少 pubspec.yaml / settings.gradle）"; exit 1
-              fi
+          if [[ -n "$FLUTTER_DIR" ]]; then
+            echo "project_type=flutter" >> "$GITHUB_OUTPUT"
+            echo "project_dir=$FLUTTER_DIR" >> "$GITHUB_OUTPUT"
+            echo "Detected Flutter project: $FLUTTER_DIR"
+            ls -la "$FLUTTER_DIR"
+            test -f "$FLUTTER_DIR/pubspec.yaml"
+            test -f "$FLUTTER_DIR/lib/main.dart"
+          elif [[ -n "$GRADLE_DIR" ]]; then
+            echo "project_type=gradle" >> "$GITHUB_OUTPUT"
+            echo "project_dir=$GRADLE_DIR" >> "$GITHUB_OUTPUT"
+            echo "Detected Android Gradle project: $GRADLE_DIR"
+            ls -la "$GRADLE_DIR"
+          else
+            echo "❌ 未检测到 Flutter 或 Android Gradle 工程（缺少 pubspec.yaml / settings.gradle）"
+            exit 1
+          fi
 
       # ---------- Flutter path (preferred) ----------
       - name: Set up JDK 17 (for both Flutter & Gradle)
@@ -128,13 +131,12 @@ jobs:
          test -f pubspec.yaml
          test -f lib/main.dart
 
-      # 关键修改：先给 android/gradlew 加执行权限
       - name: Make Gradle wrapper executable (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
         run: chmod +x ./gradlew
 
-      # ==== Flutter 工程下输出 SHA1（signingReport） ====
+      # ==== 新增：Flutter 工程下输出 SHA1（signingReport） ====
       - name: Show Android signing report (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
