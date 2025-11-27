@@ -132,23 +132,11 @@ jobs:
          test -f pubspec.yaml
          test -f lib/main.dart
 
-      # ---------- Flutter 也使用系统 Gradle ----------
-      - name: Set up Gradle 8.13
-        if: steps.detect.outputs.project_type == 'flutter' || steps.detect.outputs.project_type == 'gradle'
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 8.13
-
-      # ==== Flutter 工程下输出 SHA1（signingReport），加上跳过依赖校验的 flag ====
-      - name: Show Android signing report (Flutter)
-        if: steps.detect.outputs.project_type == 'flutter'
-        working-directory: ${{ steps.detect.outputs.project_dir }}/android
-        run: gradle signingReport --no-daemon --android-skip-build-dependency-validation
-
+      # ==== Flutter：直接用 flutter build apk + 跳过依赖校验 ====
       - name: Build APK (Flutter release)
         if: steps.detect.outputs.project_type == 'flutter'
-        working-directory: ${{ steps.detect.outputs.project_dir }}/android
-        run: gradle assembleRelease --no-daemon --android-skip-build-dependency-validation
+        working-directory: ${{ steps.detect.outputs.project_dir }}
+        run: flutter build apk --release --android-skip-build-dependency-validation
 
       - name: Upload APK (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
@@ -159,7 +147,14 @@ jobs:
             ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
             ${{ steps.detect.outputs.project_dir }}/android/app/build/outputs/apk/release/app-release.apk
 
-      # ---------- Gradle 纯 Android 分支 ----------
+      # ---------- Gradle path (fallback) ----------
+      - name: Set up Gradle 8.13
+        if: steps.detect.outputs.project_type == 'flutter' || steps.detect.outputs.project_type == 'gradle'
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.13
+
+      # ==== Gradle 工程下输出 SHA1（signingReport） ====
       - name: Show Android signing report (Gradle)
         if: steps.detect.outputs.project_type == 'gradle'
         working-directory: ${{ steps.detect.outputs.project_dir }}
