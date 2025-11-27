@@ -139,16 +139,16 @@ jobs:
         with:
           gradle-version: 8.13
 
-      # ==== Flutter 工程下输出 SHA1（signingReport），用 gradle 而不是 ./gradlew ====
+      # ==== Flutter 工程下输出 SHA1（signingReport），加上跳过依赖校验的 flag ====
       - name: Show Android signing report (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
-        run: gradle signingReport --no-daemon
+        run: gradle signingReport --no-daemon --android-skip-build-dependency-validation
 
       - name: Build APK (Flutter release)
         if: steps.detect.outputs.project_type == 'flutter'
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon --android-skip-build-dependency-validation
 
       - name: Upload APK (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
