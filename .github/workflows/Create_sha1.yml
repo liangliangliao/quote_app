@@ -147,12 +147,19 @@ jobs:
             ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
             ${{ steps.detect.outputs.project_dir }}/android/app/build/outputs/apk/release/app-release.apk
 
-      # ---------- Gradle path (fallback) ----------
+      # ---------- Gradle（Flutter + 纯 Android 共用） ----------
       - name: Set up Gradle 8.13
         if: steps.detect.outputs.project_type == 'flutter' || steps.detect.outputs.project_type == 'gradle'
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.13
+
+      # ==== 新增：Flutter 工程下也尝试输出 signingReport（忽略失败） ====
+      - name: Show Android signing report (Flutter)
+        if: steps.detect.outputs.project_type == 'flutter'
+        working-directory: ${{ steps.detect.outputs.project_dir }}/android
+        continue-on-error: true
+        run: gradle signingReport --no-daemon -x :app:ReleaseMinSdkCheck
 
       # ==== Gradle 工程下输出 SHA1（signingReport） ====
       - name: Show Android signing report (Gradle)
