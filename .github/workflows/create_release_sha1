@@ -1,0 +1,41 @@
+name: Generate release keystore
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate release keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore quote_release.jks \
+            -alias quote_release \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 36500 \
+            -storepass 123456789 \
+            -keypass 123456789 \
+            -dname "CN=QuoteApp, OU=Dev, O=QuoteApp, L=City, ST=State, C=CN"
+
+      - name: Show SHA1
+        run: |
+          echo "==== RELEASE KEYSTORE SHA1 ===="
+          keytool -list -v \
+            -keystore quote_release.jks \
+            -alias quote_release \
+            -storepass 123456789 | grep "SHA1"
+
+      - name: Upload keystore as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quote_release_keystore
+          path: quote_release.jks
