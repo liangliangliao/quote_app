@@ -93,7 +93,7 @@ jobs:
             exit 1
           fi
 
-      # ---------- Flutter path (preferred) ----------
+      # ---------- Flutter / Gradle 共用：JDK ----------
       - name: Set up JDK 17 (for both Flutter & Gradle)
         if: steps.detect.outputs.project_type == 'flutter' || steps.detect.outputs.project_type == 'gradle'
         uses: actions/setup-java@v4
@@ -101,6 +101,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # ---------- Flutter 分支 ----------
       - name: Set up Flutter
         if: steps.detect.outputs.project_type == 'flutter'
         uses: subosito/flutter-action@v2
@@ -131,37 +132,34 @@ jobs:
          test -f pubspec.yaml
          test -f lib/main.dart
 
-      - name: Make Gradle wrapper executable (Flutter)
-        if: steps.detect.outputs.project_type == 'flutter'
-        working-directory: ${{ steps.detect.outputs.project_dir }}/android
-        run: chmod +x ./gradlew
+      # ---------- Flutter 也使用系统 Gradle ----------
+      - name: Set up Gradle 8.4
+        if: steps.detect.outputs.project_type == 'flutter' || steps.detect.outputs.project_type == 'gradle'
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.7
 
-      # ==== 新增：Flutter 工程下输出 SHA1（signingReport） ====
+      # ==== Flutter 工程下输出 SHA1（signingReport），用 gradle 而不是 ./gradlew ====
       - name: Show Android signing report (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
         working-directory: ${{ steps.detect.outputs.project_dir }}/android
-        run: ./gradlew signingReport
+        run: gradle signingReport --no-daemon
 
       - name: Build APK (Flutter release)
         if: steps.detect.outputs.project_type == 'flutter'
-        run: flutter build apk --release -t lib/main.dart
-        working-directory: ${{ steps.detect.outputs.project_dir }}
+        working-directory: ${{ steps.detect.outputs.project_dir }}/android
+        run: gradle assembleRelease --no-daemon
 
       - name: Upload APK (Flutter)
         if: steps.detect.outputs.project_type == 'flutter'
         uses: actions/upload-artifact@v4
         with:
           name: quote_app-apk
-          path: ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            ${{ steps.detect.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk
+            ${{ steps.detect.outputs.project_dir }}/android/app/build/outputs/apk/release/app-release.apk
 
-      # ---------- Gradle path (fallback) ----------
-      - name: Set up Gradle 8.4
-        if: steps.detect.outputs.project_type == 'gradle'
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 8.7
-
-      # ==== Gradle 工程下输出 SHA1（signingReport） ====
+      # ---------- Gradle 纯 Android 分支 ----------
       - name: Show Android signing report (Gradle)
         if: steps.detect.outputs.project_type == 'gradle'
         working-directory: ${{ steps.detect.outputs.project_dir }}
