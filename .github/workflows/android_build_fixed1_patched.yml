@@ -105,8 +105,7 @@ jobs:
           flutter-version: '3.35.3'
           channel: stable
           cache: true
-      - name: Show signing report (debug)
-        run: ./gradlew signingReport
+      
       - name: Flutter pub get
         if: steps.detect.outputs.project_type == 'flutter'
         run: flutter pub get
